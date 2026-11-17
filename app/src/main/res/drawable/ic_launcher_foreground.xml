@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Ikonen: en vagn, en fjäder och ett lok sedda från sidan, på räls. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
+    <!-- räls -->
+    <path android:pathData="M18,71 H90" android:strokeColor="#DFE4EA" android:strokeWidth="2.4" android:strokeLineCap="round" />
+    <path android:pathData="M22,74.5 H26 M32,74.5 H36 M42,74.5 H46 M52,74.5 H56 M62,74.5 H66 M72,74.5 H76 M82,74.5 H86" android:strokeColor="#6A4F35" android:strokeWidth="2.6" />
+    <!-- vagn -->
+    <path android:pathData="M21,49 H36 V63 H21 Z" android:fillColor="#8B5A3C" />
+    <path android:pathData="M22,49 Q28.5,43 35,49 Z" android:fillColor="#2B2B30" />
+    <path android:pathData="M25,66.5 m-3.6,0 a3.6,3.6 0 1,0 7.2,0 a3.6,3.6 0 1,0 -7.2,0 M32.5,66.5 m-3.6,0 a3.6,3.6 0 1,0 7.2,0 a3.6,3.6 0 1,0 -7.2,0" android:fillColor="#22252C" />
+    <!-- fjäder -->
+    <path android:pathData="M36,57 L38.5,50 L41.5,64 L44.5,50 L47.5,64 L50.5,50 L53,57" android:strokeColor="#1B1E24" android:strokeWidth="4.2" android:strokeLineJoin="round" android:strokeLineCap="round" />
+    <path android:pathData="M36,57 L38.5,50 L41.5,64 L44.5,50 L47.5,64 L50.5,50 L53,57" android:strokeColor="#FFC93C" android:strokeWidth="2.2" android:strokeLineJoin="round" android:strokeLineCap="round" />
+    <!-- lok -->
+    <path android:pathData="M53,40 H65 V63 H53 Z" android:fillColor="#1B4F8C" />
+    <path android:pathData="M56,44 H62 V51 H56 Z" android:fillColor="#BFE3F5" />
+    <path android:pathData="M65,49 H84 Q87,49 87,52 V63 H65 Z" android:fillColor="#2466B0" />
+    <path android:pathData="M77,40 H82 V49 H77 Z" android:fillColor="#1D1D20" />
+    <path android:pathData="M69,45.5 H73 V49 H69 Z" android:fillColor="#D9B23C" />
+    <path android:pathData="M58,66.5 m-4,0 a4,4 0 1,0 8,0 a4,4 0 1,0 -8,0 M70,66.5 m-4,0 a4,4 0 1,0 8,0 a4,4 0 1,0 -8,0 M81,66.5 m-4,0 a4,4 0 1,0 8,0 a4,4 0 1,0 -8,0" android:fillColor="#22252C" />
+    <!-- rök -->
+    <path android:pathData="M79.5,35 m-3,0 a3,3 0 1,0 6,0 a3,3 0 1,0 -6,0 M74,30 m-3.8,0 a3.8,3.8 0 1,0 7.6,0 a3.8,3.8 0 1,0 -7.6,0" android:fillColor="#F2F2F2" />
+</vector>
