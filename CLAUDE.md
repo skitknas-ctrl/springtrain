@@ -3,8 +3,9 @@
 Spring Train ("gummitåg") är ett spel för Android i liggande läge. Man kör ett lok med vagnar runt en sluten bana ett antal
 varv (5 som standard) så fort som möjligt utan att spåra ur. Lok och vagnar är förbundna med fjädrar som både kan sträckas
 och tryckas ihop kring ett viloläge (en tänkt teleskopstång håller fjädern rak och ger hårda stopp). Bara loket har broms,
-så de tunga vagnarna skjuter på när man bromsar. Mynt från klarade banor används i shopen: starkare motor, bättre bromsar
-eller ett annat tåg.
+så de tunga vagnarna skjuter på när man bromsar. Mynt från klarade banor används i shopen: starkare motor, bättre bromsar,
+styvare fjädrar (de är mjuka från början) eller ett annat tåg. Banan får korsa sig själv (åtta): i samma plan, eller med bro
+eller tunnel.
 
 - Ägare: Dick (GitHub `skitknas-ctrl`). Källa: https://github.com/skitknas-ctrl/springtrain, gren `main`, publikt repo.
 - Arbetskopia: `P:\Appar\SpringTrain\`. Paketnamn `com.gr8eam.springtrain` (testbyggen `.debug`).
@@ -38,7 +39,7 @@ Det finns ingen JDK eller Android SDK på Dicks dator. Appen byggs av GitHub Act
   `defaults.js` med `ST_SIM.merge` (objekt slås ihop nyckel för nyckel, listorna `trains` och `levels` ersätts helt).
   Ett sent svar sparas till nästa start.
 - Spelarens data ligger i localStorage `springtrain.save.v1`: `money`, `train` (valt tåg), `owned` (`{tågid: {engine, brake}}`),
-  `best` (bästa tid per ban-id), `stars`, `sound`. Ban- och tåg-id får därför inte bytas på sådant som redan finns.
+  `best` (bästa tid per ban-id), `stars`, `sound`. Uppgraderingar per tåg: `engine`, `brake`, `spring` (nivå 0–`maxLevel`). Ban- och tåg-id får därför inte bytas på sådant som redan finns.
 
 ## Fysiken (sim.js)
 
@@ -49,7 +50,23 @@ Det finns ingen JDK eller Android SDK på Dicks dator. Appen byggs av GitHub Act
   tyngdkraft längs lutningen.
 - Urspårning per fordon: `v²·|krökning| / derailG` är kurvbelastningen (mätaren CURVE LOAD); över 1 längre än
   `derailGrace` sekunder spårar fordonet ur. En vagn kan alltså spåra ur fast loket klarade kurvan.
+- Fjäderns styvhet = `physics.springK` × (1 + `economy.springStep` × köpt fjädernivå). `springK` är alltså det mjukaste läget.
+- Korsningar: `buildTrack` hittar ställen där spåret korsar sig självt (`track.crossings`). Höjdskillnad under 0,6 m =
+  korsning i samma plan; minst `CLEAR` (4,5 m) = olika plan (`sep`), som ritas som bro eller, med `crossing: 'tunnel'` på banan,
+  som tunnel. Däremellan ser det fel ut (adminsidans editor varnar). Tåget kan inte krocka med sig självt.
 - `autopilot(train, margin)` är en enkel förare (demon bakom menyn, kalibrering, adminsidans "Räkna partider").
+
+## Ritningen (game.js)
+
+- Sned vy uppifrån utan kameravridning: `px(x)`, `py(y, z)`. Allt har mörk konturlinje (`INK`) för ett tecknat utseende.
+- Marken är en förritad gräsplatta (`makeGrass`) som läggs ut i rutor. Landskapet (dammar, hus, lador, väderkvarnar, får, kor,
+  träd, buskar, stenar, höbalar) slumpas fram per bana i `levelData` med fast frö och läggs i rutor om `CELL` meter, så att bara
+  det synliga gås igenom. Inget placeras på spåret (`clearOfTrack`). Det finns ännu inget sätt att placera föremål för hand.
+- Ritordning i `render`: mark och dammar → allt spår utom spannen → föremål och fordon sorterade bortifrån och framåt →
+  spannen över korsningar (bro eller tunnelkulle med stenmynningar; fordon i en mynning mot kameran ritas om inuti ett urklipp)
+  → fordon som står uppe på ett spann → rök → molnskuggor → karta.
+- Fordonen byggs av lådor (`box`) med detaljer på sidan mot kameran (`sideRect`), hjul med snurrande ekrar och fem sorters
+  vagnslast (`WAGON_KINDS`).
 
 ## Prova lokalt
 
@@ -59,7 +76,9 @@ python -m http.server 8766 --directory P:\Appar\SpringTrain\web
 
 Öppna http://localhost:8766/ i liggande mobilformat (t.ex. 860×400). Tangentbord: pil upp/W = gas, pil ned/S/mellanslag = broms.
 Provlägen: `?level=N` startar bana N (0 = första) direkt, `&auto=1` låter föraren köra, `&margin=0.8` förarens marginal,
-`&warp=20` spolar fram 20 sekunder, `?screen=shop|levels|info` öppnar en meny. Skärmbild utan fönster: headless Edge
+`&warp=20` spolar fram 20 sekunder, `?screen=shop|levels|info` öppnar en meny. `?local=1` hoppar över hämtningen från servern
+(bara inbyggda värden), `&pos=120&hold=1` ställer tåget 120 m in på banan och håller det stilla, `&find=house` (mill, pond,
+sheep, cow, tree) ställer kameran vid första föremålet av den sorten. Ta en skärmbild i taget: flera samtidiga Edge hänger sig. Skärmbild utan fönster: headless Edge
 (`msedge --headless=new --window-size=860,400 --screenshot=...`).
 
 Efter ändrad fysik eller ändrade banor: `node tools/calibrate.js --par` och för in partiderna i `defaults.js`.
@@ -77,7 +96,11 @@ Bygget kör `node tools/calibrate.js --check` (varje bana ska gå att köra klar
 ## Adminsidan och API:et (gr8eam.com/springtrain)
 
 - `index.php` (kräver `auth_require_admin()`): formulär för allmänt, fysik, ekonomi, tåg och banor, förhandsbild av varje bana,
-  "Räkna partider", historik över sparade versioner och rå JSON.
+  "Räkna partider", historik över sparade versioner och rå JSON. Baneditorn (helskärm, `edOppna`) öppnas från varje bana: dra
+  punkter, klicka på spåret för ny punkt, höjdprofil där höjder dras, ångra, mallar (oval, åtta, stor slinga), korsningar
+  markeras. "Lägg till inbyggda banor som saknas" hämtar nya banor ur `defaults.js` till den sparade listan.
+- Det som sparats på servern ersätter hela listorna `trains` och `levels`. Nya banor i `defaults.js` syns därför inte i appen
+  förrän de lagts till i admin och sparats.
 - `api/config.php`: öppet GET med CORS `*` ger `{config, updated}`; sparning (POST, admin + csrf) skriver till
   `springtrain_config` (en rad) och `springtrain_config_logg` (30 senaste) i `gr8eam_db`.
 - `defaults.js` och `sim.js` på servern är KOPIOR av `web/js/` i det här repot. Kopiera dem före varje deploy:

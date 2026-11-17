@@ -90,18 +90,65 @@
       maxZ = Math.max(maxZ, z[i]);
     }
     track.minRadius = minR; track.maxGrade = maxG; track.maxZ = maxZ;
+    track.crossings = findCrossings(track);
     return track;
+  }
+
+  // Höjdskillnad (m) som krävs för att två spår ska räknas som korsning i olika plan (bro eller tunnel).
+  var CLEAR = 4.5;
+
+  /* Ställen där banan korsar sig själv (t.ex. mitten av en åtta). Varje korsning:
+   *   lo, hi  = index för det undre och det övre spårets punkt, x, y = läget,
+   *   zLo, zHi, dz = höjder och skillnad, angle = vinkeln mellan spåren (0–π/2),
+   *   sep = true när höjdskillnaden räcker för bro/tunnel, annars korsar spåren varandra i samma plan. */
+  function findCrossings(tr) {
+    var N = tr.N, x = tr.x, y = tr.y, C = 6, cells = {}, out = [], i, j, key;
+    var gap = Math.max(3, Math.round(14 / tr.ds)); // grannar längs spåret räknas inte
+    for (i = 0; i < N; i++) {
+      key = Math.floor(x[i] / C) + ',' + Math.floor(y[i] / C);
+      (cells[key] || (cells[key] = [])).push(i);
+    }
+    for (i = 0; i < N; i++) {
+      var i2 = (i + 1) % N, cx = Math.floor(x[i] / C), cy = Math.floor(y[i] / C);
+      for (var gx = cx - 1; gx <= cx + 1; gx++) for (var gy = cy - 1; gy <= cy + 1; gy++) {
+        var list = cells[gx + ',' + gy];
+        if (!list) continue;
+        for (var q = 0; q < list.length; q++) {
+          j = list[q];
+          if (j <= i) continue;
+          var dIdx = Math.min(j - i, N - (j - i));
+          if (dIdx < gap) continue;
+          var j2 = (j + 1) % N;
+          var rx = x[i2] - x[i], ry = y[i2] - y[i], sx = x[j2] - x[j], sy = y[j2] - y[j];
+          var den = rx * sy - ry * sx;
+          if (Math.abs(den) < 1e-9) continue;
+          var t = ((x[j] - x[i]) * sy - (y[j] - y[i]) * sx) / den, u = ((x[j] - x[i]) * ry - (y[j] - y[i]) * rx) / den;
+          if (t < 0 || t >= 1 || u < 0 || u >= 1) continue;
+          var px = x[i] + rx * t, py = y[i] + ry * t, dup = false;
+          for (var d = 0; d < out.length; d++) if (Math.hypot(out[d].x - px, out[d].y - py) < 4) dup = true;
+          if (dup) continue;
+          var zi = tr.z[i], zj = tr.z[j], lo = zi <= zj ? i : j, hi = zi <= zj ? j : i;
+          var dot = Math.abs(tr.tx[i] * tr.tx[j] + tr.ty[i] * tr.ty[j]);
+          out.push({ lo: lo, hi: hi, x: px, y: py, zLo: Math.min(zi, zj), zHi: Math.max(zi, zj), dz: Math.abs(zi - zj),
+            angle: Math.acos(Math.min(1, dot)), sep: Math.abs(zi - zj) >= CLEAR });
+        }
+      }
+    }
+    return out;
   }
 
   /* ---------- Tåg ---------- */
 
   var LOCO_LEN = 9, WAGON_LEN = 6; // loket är 50 % längre än vagnarna
 
-  /** Lokets värden med uppgraderingar inräknade. up = {engine: nivå, brake: nivå}. */
+  /** Tågets värden med uppgraderingar inräknade. up = {engine: nivå, brake: nivå, spring: nivå}.
+   *  Fjädrarna är mjukast från början (physics.springK) och blir styvare för varje köpt nivå. */
   function locoStats(cfg, spec, up) {
     var e = 1 + (cfg.economy.engineStep || 0) * ((up && up.engine) || 0);
     var b = 1 + (cfg.economy.brakeStep || 0) * ((up && up.brake) || 0);
-    return { power: spec.power * 1000 * e, force: spec.force * 1000 * e, brake: spec.brake * 1000 * b, mass: spec.mass * 1000 };
+    var s = 1 + (cfg.economy.springStep || 0) * ((up && up.spring) || 0);
+    return { power: spec.power * 1000 * e, force: spec.force * 1000 * e, brake: spec.brake * 1000 * b, mass: spec.mass * 1000,
+      springK: cfg.physics.springK * 1000 * s };
   }
 
   function Train(cfg, track, spec, level, up) {
@@ -142,7 +189,7 @@
 
   Train.prototype._sub = function (h, thr, brk) {
     var ph = this.ph, cars = this.cars, st = this.stats, tr = this.track, G = ph.gravity, p = this._p, i, c;
-    var k = ph.springK * 1000, damp = ph.springDamp * 1000;
+    var k = st.springK, damp = ph.springDamp * 1000;
     var f = [];
     for (i = 0; i < cars.length; i++) {
       c = cars[i];
@@ -238,7 +285,7 @@
   }
 
   var api = { buildTrack: buildTrack, Train: Train, autopilot: autopilot, locoStats: locoStats, merge: merge,
-    LOCO_LEN: LOCO_LEN, WAGON_LEN: WAGON_LEN };
+    LOCO_LEN: LOCO_LEN, WAGON_LEN: WAGON_LEN, CLEAR: CLEAR };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.ST_SIM = api;
 })(this);

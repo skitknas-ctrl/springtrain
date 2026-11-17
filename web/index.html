@@ -8,7 +8,7 @@
 <style>
 :root{--ink:#1c2230;--panel:#232b3bee;--line:#3b465c;--text:#f3f1e7;--dim:#aab3c2;--gold:#ffc93c;--go:#4cc95a;--stop:#e5493f}
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent;user-select:none;-webkit-user-select:none}
-html,body{margin:0;height:100%;overflow:hidden;background:#3f7a3a;color:var(--text);
+html,body{margin:0;height:100%;overflow:hidden;background:#62b54a;color:var(--text);
   font:15px/1.35 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;touch-action:none}
 canvas#c{position:fixed;inset:0;width:100%;height:100%;display:block}
 button{font:inherit;color:inherit;cursor:pointer;border:0}
@@ -91,6 +91,7 @@ body.play .zone{display:flex}
 .bar{flex:1;height:10px;background:#0006;border-radius:5px;overflow:hidden;position:relative}
 .bar i{position:absolute;left:0;top:0;bottom:0;border-radius:5px;background:#7fd0ff}
 .bar i.b{background:#ff9d8f}
+.bar i.s{background:#ffd76a}
 .row .lvl{width:52px;font-size:12px;color:var(--dim);text-align:right}
 .row .btn{min-width:108px}
 .info p,.info li{margin:0 0 7px}
@@ -154,8 +155,9 @@ body.play .zone{display:flex}
       <li>The engine and the wagons are joined by <b>springs</b>. Only the engine has brakes, so when you brake the heavy wagons keep pushing from behind, and when you accelerate they lag and then snap forward.</li>
       <li>Watch the <b>curve load</b> bar. If any part of the train takes a curve too fast it <b>derails</b> and the run is over. A wagon can derail even when the engine made it through.</li>
       <li>The small map shows the whole track. Tight curves are marked in orange and red.</li>
-      <li>Finish to earn coins. Faster times give more stars and more coins. Spend them in the <b>shop</b> on a stronger engine, better brakes or a new train.</li>
-      <li>Later tracks add more wagons and hills. Uphill costs speed, downhill the wagons push harder.</li>
+      <li>Finish to earn coins. Faster times give more stars and more coins. Spend them in the <b>shop</b> on a stronger engine, better brakes, stiffer springs or a new train.</li>
+      <li>The springs start out <b>soft</b>, so the wagons swing a long way. Stiffer springs from the shop make the train easier to control.</li>
+      <li>Later tracks add more wagons, hills, crossings, bridges and tunnels. Uphill costs speed, downhill the wagons push harder.</li>
     </ul>
   </div>
 </div></div>

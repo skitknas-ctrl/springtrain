@@ -29,13 +29,13 @@ for (const lv of cfg.levels) {
   do { a = run(lv, base, null, m); m -= 0.05; } while (!a.ok && m > 0.4);
   const b = run(lv, base, null, 0.6);
   const top = cfg.trains[cfg.trains.length - 1];
-  const c = run(lv, top, { engine: cfg.economy.maxLevel, brake: cfg.economy.maxLevel }, 0.9);
+  const c = run(lv, top, { engine: cfg.economy.maxLevel, brake: cfg.economy.maxLevel, spring: cfg.economy.maxLevel }, 0.9);
   const f = (x, n = 1) => x.toFixed(n).padStart(6);
   console.log(lv.id.padEnd(14), f(a.track.L, 0), f(a.track.minRadius, 0), f(a.track.maxGrade * 100), f(a.track.maxZ),
     '|', a.ok ? f(a.time) : ' SPÅR' + a.derailed, f(a.maxV * 3.6, 0) + ' km/h', f(a.maxStretch, 2),
     '|', b.ok ? f(b.time) : ' SPÅR' + b.derailed, c.ok ? f(c.time) : ' SPÅR' + c.derailed);
   const gold = Math.ceil(a.time), silver = Math.ceil(a.time * 1.12), bronze = Math.ceil(a.time * 1.3);
-  pars.push(`${lv.id}: par: [${gold}, ${silver}, ${bronze}]`);
+  pars.push(`${lv.id}: par: [${gold}, ${silver}, ${bronze}]` + a.track.crossings.map(c => `  korsning dz ${c.dz.toFixed(1)} vinkel ${(c.angle * 57.3).toFixed(0)}°`).join(''));
 }
 if (process.argv.includes('--check')) {
   // används av bygget: varje bana ska gå att köra klart med starttåget och en försiktig förare

@@ -28,6 +28,7 @@
   }
 
   function fetchConfig(done) {
+    if (Q.get('local') === '1') { done(); return; } // provläge: bara de inbyggda värdena, ingen hämtning
     var finished = false, timer = setTimeout(function () { end(null); }, 2500);
     function end(data) {
       // ett sent svar sparas till nästa start; det tas bara i bruk direkt om spelaren står kvar på startskärmen
@@ -53,8 +54,10 @@
     if (typeof save.money !== 'number') save.money = CFG.economy.startMoney || 0;
     save.owned = save.owned || {}; save.best = save.best || {}; save.stars = save.stars || {};
     var first = CFG.trains[0];
-    CFG.trains.forEach(function (t) { if (!(t.price > 0) && !save.owned[t.id]) save.owned[t.id] = { engine: 0, brake: 0 }; });
-    if (!save.owned[first.id]) save.owned[first.id] = { engine: 0, brake: 0 };
+    CFG.trains.forEach(function (t) { if (!(t.price > 0) && !save.owned[t.id]) save.owned[t.id] = { engine: 0, brake: 0, spring: 0 }; });
+    if (!save.owned[first.id]) save.owned[first.id] = { engine: 0, brake: 0, spring: 0 };
+    // sparningar från före fjäderuppgraderingen saknar nivån
+    for (var id in save.owned) ['engine', 'brake', 'spring'].forEach(function (k) { if (typeof save.owned[id][k] !== 'number') save.owned[id][k] = 0; });
     if (!save.train || !save.owned[save.train] || !trainSpec(save.train)) save.train = first.id;
   }
   function persist() { writeJson(SAVE_KEY, save); }
@@ -84,40 +87,140 @@
   /* ---------- banor ---------- */
 
   var trackCache = {};
+  var BW = 2.1;      // ballastens halva bredd (m)
+  var HILL = 1.15;   // tunnelkullens släntbredd per meter höjd
+  var CELL = 48;     // landskapets föremål ligger i rutor om så många meter, så att bara de synliga gås igenom
+
   function levelData(idx) {
     if (trackCache[idx]) return trackCache[idx];
-    var lv = CFG.levels[idx], tr = SIM.buildTrack(lv.points, 1), i, N = tr.N;
+    var lv = CFG.levels[idx], tr = SIM.buildTrack(lv.points, 1), i, k, N = tr.N, key;
     var minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity, kMax = 0;
     for (i = 0; i < N; i++) {
       minX = Math.min(minX, tr.x[i]); maxX = Math.max(maxX, tr.x[i]);
       minY = Math.min(minY, tr.y[i]); maxY = Math.max(maxY, tr.y[i]);
       kMax = Math.max(kMax, Math.abs(tr.k[i]));
     }
-    // ritordning för banken: längst bort först (kameran vrids aldrig, så ordningen är fast)
+
+    // Korsningar i olika plan: det övre spåret får ett "spann" (bro eller tunnelkulle) som ritas efter det undre.
+    var span = new Uint8Array(N), spans = [];
+    (tr.crossings || []).forEach(function (c) {
+      if (!c.sep) return;
+      var kind = lv.crossing === 'tunnel' ? 2 : 1, sn = Math.max(0.35, Math.sin(c.angle)), cs = Math.cos(c.angle);
+      // tunnelkullen har flackare slänter än en vanlig banvall (HILL i stället för 0.45 m bredd per meter höjd)
+      var foot = BW + 0.5 + c.zHi * (kind === 2 ? HILL : 0.45);
+      var half = Math.max(7, Math.min(34, kind === 2 ? 2.8 / sn + foot / sn + 6 : 4.8 / sn + 1.5));
+      var h = Math.round(half / tr.ds), list = [];
+      for (k = -h; k <= h; k++) { var q = ((c.hi + k) % N + N) % N; span[q] = kind; list.push(q); }
+      var sp = { kind: kind, c: c, list: list, order: list.slice().sort(function (a, b) { return tr.y[a] - tr.y[b]; }), portals: [] };
+      if (kind === 2) {
+        // tunnelmynningar av sten på det undre spåret, en på var sida om kullen
+        var inner = Math.max(BW, foot - 4.9 / c.zHi * (foot - BW)) - 0.6; // där kullen är lika hög som mynningen
+        var dC = (inner + foot + 0.5) / (2 * sn), hl = (foot + 0.5 - inner) / (2 * sn);
+        [1, -1].forEach(function (dir) {
+          var p = tr.at(c.lo * tr.ds + dir * dC);
+          sp.portals.push({ x: p.x, y: p.y, z: p.z, dx: p.tx * dir, dy: p.ty * dir, hl: hl });
+        });
+        sp.portals.sort(function (a, b) { return a.y - b.y; });
+      }
+      spans.push(sp);
+    });
+    spans.sort(function (a, b) { return a.c.y - b.c.y; });
+
+    // ritordning för banvallen: längst bort först (kameran vrids aldrig, så ordningen är fast)
     var order = [];
-    for (i = 0; i < N; i++) order.push(i);
+    for (i = 0; i < N; i++) if (!span[i]) order.push(i);
     order.sort(function (a, b) { return tr.y[a] - tr.y[b]; });
-    // träd, utplacerade med fast slump per bana och aldrig nära spåret
-    var R = rng(1000 + idx * 77), trees = [], pad = 70, tries = Math.round((maxX - minX + 2 * pad) * (maxY - minY + 2 * pad) / 520);
-    for (var t = 0; t < tries; t++) {
-      var x = minX - pad + R() * (maxX - minX + 2 * pad), y = minY - pad + R() * (maxY - minY + 2 * pad), ok = true;
-      for (i = 0; i < N; i += 3) { var dx = tr.x[i] - x, dy = tr.y[i] - y; if (dx * dx + dy * dy < 90) { ok = false; break; } }
-      if (ok) trees.push({ x: x, y: y, r: 2 + R() * 1.8, h: 4 + R() * 3, c: R() < 0.3 ? '#2f7d3a' : (R() < 0.5 ? '#2a6e33' : '#3a8a40'), pine: R() < 0.35 });
+
+    // rutnät över spåret, för att snabbt kunna fråga "ligger det spår nära den här punkten?" även på stora banor
+    var G = 8, grid = {};
+    for (i = 0; i < N; i++) { key = Math.floor(tr.x[i] / G) + ',' + Math.floor(tr.y[i] / G); (grid[key] || (grid[key] = [])).push(i); }
+    function clearOfTrack(x, y, r) {
+      var n = Math.ceil((r + 8) / G), cx = Math.floor(x / G), cy = Math.floor(y / G);
+      for (var gx = cx - n; gx <= cx + n; gx++) for (var gy = cy - n; gy <= cy + n; gy++) {
+        var l = grid[gx + ',' + gy];
+        if (!l) continue;
+        for (var q = 0; q < l.length; q++) {
+          var j = l[q];
+          if (Math.hypot(tr.x[j] - x, tr.y[j] - y) - (BW + 0.5 + tr.z[j] * 0.45) < r) return false;
+        }
+      }
+      return true;
     }
-    trees.sort(function (a, b) { return a.y - b.y; });
-    return (trackCache[idx] = { lv: lv, tr: tr, order: order, trees: trees, box: [minX, minY, maxX, maxY], kMax: kMax, mini: null });
+
+    // landskapet: dammar, hus, djur, träd, buskar och stenar, utplacerade med fast slump per bana och aldrig på spåret
+    var R = rng(1000 + idx * 77), pad = 110, x0 = minX - pad, y0 = minY - pad, w = maxX - minX + 2 * pad, h2 = maxY - minY + 2 * pad;
+    var area = w * h2, cells = {}, big = [], count = 0;
+    function put(o) { key = Math.floor(o.x / CELL) + ',' + Math.floor(o.y / CELL); (cells[key] || (cells[key] = [])).push(o); count++; return o; }
+    function free(x, y, r) { for (var b = 0; b < big.length; b++) if (Math.hypot(big[b].x - x, big[b].y - y) < r + big[b].r) return false; return true; }
+    function scatter(n, fn) { for (var t = 0; t < n; t++) fn(x0 + R() * w, y0 + R() * h2); }
+    var p1 = R() * 6, p2 = R() * 6, p3 = R() * 6;
+    function grove(x, y) { return Math.sin(x * 0.021 + p1) + Math.sin(y * 0.027 + p2) + Math.sin((x + y) * 0.013 + p3); }
+
+    scatter(Math.round(area / 5200), function (x, y) {            // dammar
+      var r = 6 + R() * 6;
+      if (big.length < area / 14000 && clearOfTrack(x, y, r + 3) && free(x, y, r + 4)) { big.push(put({ t: 'pond', g: 1, x: x, y: y, r: r, v: R() })); }
+    });
+    var houseCols = ['#c9463a', '#c9463a', '#f3d36b', '#f4f0e4', '#8fc0de'], nHouse = 0;
+    scatter(Math.round(area / 3000), function (x, y) {            // hus, lador och väderkvarnar
+      if (nHouse >= area / 15000 || !clearOfTrack(x, y, 11) || !free(x, y, 10)) return;
+      nHouse++;
+      var q = R(), o = { x: x, y: y, r: 8, v: R(), a: (R() - 0.5) * 1.2 };
+      if (q < 0.18) { o.t = 'mill'; o.r = 6; }
+      else if (q < 0.42) { o.t = 'house'; o.barn = 1; o.hl = 5.5; o.hw = 3.4; o.h = 4.2; o.rh = 3.2; o.c = '#b83a30'; o.roof = '#4a4d57'; }
+      else { o.t = 'house'; o.hl = 3.6 + R() * 1.2; o.hw = 2.7; o.h = 3; o.rh = 2.6; o.c = houseCols[Math.floor(R() * houseCols.length)]; o.roof = R() < 0.5 ? '#d9703a' : '#5b5f6b'; }
+      big.push(put(o));
+      if (o.barn) for (var b = 0; b < 3; b++) {                   // höbalar vid ladan
+        var hx = x + (R() - 0.5) * 22, hy = y + 5 + R() * 8;
+        if (clearOfTrack(hx, hy, 3) && free(hx, hy, 1.5)) put({ t: 'hay', x: hx, y: hy, v: R() });
+      }
+    });
+    scatter(Math.round(area / 6000), function (x, y) {            // fårflockar och kor
+      if (!clearOfTrack(x, y, 7) || !free(x, y, 6)) return;
+      var kind = R() < 0.6 ? 'sheep' : 'cow', n = 2 + Math.floor(R() * 4);
+      for (var b = 0; b < n; b++) {
+        var ax = x + (R() - 0.5) * 13, ay = y + (R() - 0.5) * 10;
+        if (clearOfTrack(ax, ay, 3) && free(ax, ay, 1)) put({ t: kind, x: ax, y: ay, v: R(), f: R() < 0.5 ? 1 : -1 });
+      }
+      big.push({ x: x, y: y, r: 7 });
+    });
+    var greens = ['#3f9c46', '#35893f', '#4cae4f', '#2f7d3a'];
+    scatter(Math.round(area / 330), function (x, y) {             // träd, tätare i dungar
+      if (grove(x, y) < -0.5 + R() * 1.6) return;
+      var r = 2 + R() * 1.9;
+      if (!clearOfTrack(x, y, r + 2.5) || !free(x, y, r * 0.5)) return;
+      var q = R();
+      put({ t: 'tree', x: x, y: y, r: r, h: 4.5 + R() * 3.5, c: greens[Math.floor(R() * greens.length)], k: q < 0.3 ? 1 : q < 0.42 ? 2 : q < 0.52 ? 3 : 0, v: R() });
+    });
+    scatter(Math.round(area / 900), function (x, y) {             // buskar
+      if (clearOfTrack(x, y, 3) && free(x, y, 0.5)) put({ t: 'bush', x: x, y: y, r: 0.9 + R() * 0.8, c: greens[Math.floor(R() * 3)], v: R() });
+    });
+    scatter(Math.round(area / 2400), function (x, y) {            // stenar
+      if (clearOfTrack(x, y, 2.5) && free(x, y, 0.5)) put({ t: 'rock', x: x, y: y, r: 0.7 + R() * 1.1, v: R() });
+    });
+
+    return (trackCache[idx] = { lv: lv, tr: tr, order: order, span: span, spans: spans, cells: cells, box: [minX, minY, maxX, maxY], kMax: kMax });
   }
 
   // Liten karta över banan; snäva kurvor i orange och rött. Används på körskärmen och i banvalet.
   function drawMini(c, data, w, h, lineW) {
     var tr = data.tr, b = data.box, sc = Math.min((w - 8) / (b[2] - b[0]), (h - 8) / (b[3] - b[1]));
     var ox = w / 2 - (b[0] + b[2]) / 2 * sc, oy = h / 2 - (b[1] + b[3]) / 2 * sc, lim = CFG.physics.derailG;
+    var st = Math.max(2, Math.round(tr.N / 400));
     c.lineCap = 'round'; c.lineWidth = lineW;
-    for (var i = 0; i < tr.N; i += 2) {
-      var j = (i + 2) % tr.N, k = Math.abs(tr.k[i]), vs = k > 1e-6 ? Math.sqrt(lim / k) : 99;
+    function seg(i) {
+      var j = (i + st) % tr.N, k = Math.abs(tr.k[i]), vs = k > 1e-6 ? Math.sqrt(lim / k) : 99;
       c.strokeStyle = vs < 16 ? '#ff5a3c' : vs < 21 ? '#ffb23c' : '#ffffff';
       c.beginPath(); c.moveTo(ox + tr.x[i] * sc, oy + tr.y[i] * sc); c.lineTo(ox + tr.x[j] * sc, oy + tr.y[j] * sc); c.stroke();
     }
+    for (var i = 0; i < tr.N; i += st) seg(i);
+    // vid bro/tunnel: det övre spåret ritas om överst med mörk kant, så att man ser vilket som går över
+    data.spans.forEach(function (sp) {
+      var a = sp.c.hi - 7, n;
+      c.strokeStyle = '#10151f'; c.lineWidth = lineW * 2.1; c.beginPath();
+      for (n = 0; n <= 14; n++) { var q = ((a + n) % tr.N + tr.N) % tr.N; c[n ? 'lineTo' : 'moveTo'](ox + tr.x[q] * sc, oy + tr.y[q] * sc); }
+      c.stroke();
+      c.strokeStyle = '#ffffff'; c.lineWidth = lineW; c.stroke();
+    });
     return { sc: sc, ox: ox, oy: oy };
   }
 
@@ -135,7 +238,7 @@
     run = { idx: idx, data: data, spec: spec, train: train, demo: demo, auto: demo || Q.get('auto') === '1',
       count: demo ? 0 : 3.2, cam: { x: p.x, y: p.y, z: p.z }, parts: [], wreck: null, crashT: 0, lap: 0, flash: null,
       shake: 0, doneT: 0, wagonCols: [] };
-    var cols = ['#8b5a3c', '#3f6f9e', '#7d7f86', '#9a4b3f', '#5d7d49', '#a07a2c'];
+    var cols = ['#c0563f', '#3f7fbf', '#e0a530', '#4f9a55', '#8a62b8', '#d9773a'];
     for (var i = 0; i < data.lv.wagons; i++) run.wagonCols.push(cols[i % cols.length]);
     if (!demo) {
       var mc = document.createElement('canvas'); mc.width = 260; mc.height = 170;
@@ -199,12 +302,13 @@
     });
     CFG.trains.forEach(function (t) {
       var own = save.owned[t.id], sel = save.train === t.id;
-      var el = own ? own.engine : 0, bl = own ? own.brake : 0;
+      var el = own ? own.engine : 0, bl = own ? own.brake : 0, sl = own ? own.spring : 0, sMax = 1 + (e.springStep || 0) * e.maxLevel;
       html += '<div class="train' + (sel ? ' sel' : '') + '"><div class="top"><span class="sw" style="background:' + esc(t.color) + '"></span><b>' + esc(t.name) +
         '</b><span style="color:var(--dim);font-size:13px">' + t.mass + ' t</span><span style="flex:1"></span>' +
         (own ? (sel ? '<span style="color:var(--gold);font-weight:800">In use</span>' : '<button class="btn small" data-act="use" data-id="' + t.id + '">Use this train</button>')
           : '<button class="btn gold" data-act="buy" data-id="' + t.id + '"' + (save.money < t.price ? ' disabled' : '') + '>Buy ' + money(t.price) + '</button>') + '</div>';
-      [['Engine', 'engine', el, t.power * (1 + e.engineStep * el) / maxP, ''], ['Brakes', 'brake', bl, t.brake * (1 + e.brakeStep * bl) / maxB, 'b']].forEach(function (r) {
+      [['Engine', 'engine', el, t.power * (1 + e.engineStep * el) / maxP, ''], ['Brakes', 'brake', bl, t.brake * (1 + e.brakeStep * bl) / maxB, 'b'],
+        ['Springs', 'spring', sl, (1 + (e.springStep || 0) * sl) / sMax, 's']].forEach(function (r) {
         var cost = upgradeCost(r[2]), full = r[2] >= e.maxLevel;
         html += '<div class="row"><span class="nm">' + r[0] + '</span><span class="bar"><i class="' + r[4] + '" style="width:' + Math.round(r[3] * 100) + '%"></i></span>' +
           '<span class="lvl">Lv ' + r[2] + '/' + e.maxLevel + '</span>' +
@@ -223,7 +327,7 @@
     if (!b || b.disabled) return;
     var t = trainSpec(b.dataset.id), own = save.owned[t.id];
     if (b.dataset.act === 'buy' && !own && save.money >= t.price) {
-      save.money -= t.price; save.owned[t.id] = { engine: 0, brake: 0 }; save.train = t.id; beep(880, .12);
+      save.money -= t.price; save.owned[t.id] = { engine: 0, brake: 0, spring: 0 }; save.train = t.id; beep(880, .12);
     } else if (b.dataset.act === 'use' && own) {
       save.train = t.id;
     } else if (b.dataset.act === 'up' && own) {
@@ -380,6 +484,8 @@
       el.textContent = run.count > 0.2 ? Math.min(3, now) : 'GO!';
       if (now !== before) beep(now <= 0 ? 880 : 440, now <= 0 ? .4 : .15);
       if (run.count <= 0) setTimeout(function () { el.style.display = 'none'; }, 500);
+    } else if (run.hold) {
+      // provläge &hold=1: tåget står stilla där &pos= ställde det
     } else if (!tn.finished) {
       var a = run.auto ? SIM.autopilot(tn, run.demo ? 0.6 : parseFloat(Q.get('margin') || '0.8')) : { thr: thr, brk: brk };
       tn.clunk = 0;
@@ -424,6 +530,7 @@
       if (q.life >= q.max) { run.parts.splice(i, 1); continue; }
       q.x += q.vx * dt; q.y += q.vy * dt; q.z += q.vz * dt; if (q.g) q.vz -= q.g * dt;
     }
+    if (run.findCam) { run.cam.x = run.findCam.x; run.cam.y = run.findCam.y; run.cam.z = 0; return; }
     // kameran följer loket och tittar lite framåt i färdriktningen
     var lead = carPose(run, 0, P3), v = run.wreck ? 0 : cars[0].v;
     var tx = lead.x + lead.ux * v * 1.1, ty = lead.y + lead.uy * v * 1.1, f = 1 - Math.exp(-dt * 2.6);
@@ -460,7 +567,8 @@
   /* ---------- ritning ---------- */
 
   var cv = $('c'), ctx = cv.getContext('2d'), W = 0, H = 0, DPR = 1;
-  var S = 5, TY = 0.62, TZ = 0.78, OX = 0, OY = 0;
+  var S = 5, TY = 0.62, TZ = 0.78, OX = 0, OY = 0, LW = 1, NOW = 0;
+  var INK = 'rgba(24,28,40,.55)'; // mörk konturlinje runt allt, ger det tecknade utseendet
   function resize() {
     DPR = Math.min(2, window.devicePixelRatio || 1);
     W = window.innerWidth; H = window.innerHeight;
@@ -469,62 +577,350 @@
   function px(x) { return OX + x * S; }
   function py(y, z) { return OY + (y * TY - z * TZ) * S; }
 
+  // Månghörning i världen: pts = [x, y, z, x, y, z, ...]. stroke = true ger konturlinje.
+  function poly(pts, fill, stroke) {
+    ctx.beginPath();
+    for (var i = 0; i < pts.length; i += 3) { if (i) ctx.lineTo(px(pts[i]), py(pts[i + 1], pts[i + 2])); else ctx.moveTo(px(pts[i]), py(pts[i + 1], pts[i + 2])); }
+    ctx.closePath();
+    if (fill) { ctx.fillStyle = fill; ctx.fill(); }
+    if (stroke) { ctx.strokeStyle = stroke === true ? INK : stroke; ctx.lineWidth = LW; ctx.lineJoin = 'round'; ctx.stroke(); }
+  }
+  function disc(x, y, r, fill, stroke) { // cirkel i skärmens koordinater
+    ctx.beginPath(); ctx.arc(x, y, r, 0, 6.3); ctx.fillStyle = fill; ctx.fill();
+    if (stroke) { ctx.strokeStyle = INK; ctx.lineWidth = LW; ctx.stroke(); }
+  }
+  function groundShadow(x, y, rx, ry) {
+    ctx.fillStyle = 'rgba(10,50,20,.22)'; ctx.beginPath();
+    ctx.ellipse(px(x) + rx * S * 0.35, py(y, 0) + 1, rx * S, ry * S * TY, 0, 0, 6.3); ctx.fill();
+  }
+
   // Låda sedd snett uppifrån (kameran står söder om banan): de två sidor som vetter mot kameran och taket ritas.
   function box(cx, cy, cz, ux, uy, sl, hl, hw, z0, z1, colTop, colSide, tint) {
-    var X = [], Y = [], Zb = [], i, k = 0;
+    var X = [], Y = [], Zb = [], k = 0;
     for (var a = -1; a <= 1; a += 2) for (var b = -1; b <= 1; b += 2) {
       X[k] = cx + ux * hl * a - uy * hw * b; Y[k] = cy + uy * hl * a + ux * hw * b; Zb[k] = cz + sl * hl * a; k++;
     }
     // hörn: 0 = bak höger(−,−), 1 = bak vänster(−,+), 2 = fram(+,−), 3 = fram(+,+)
+    ctx.lineWidth = LW; ctx.lineJoin = 'round'; ctx.strokeStyle = INK;
     function face(i0, i1, col) {
       ctx.fillStyle = col; ctx.beginPath();
       ctx.moveTo(px(X[i0]), py(Y[i0], Zb[i0] + z0)); ctx.lineTo(px(X[i1]), py(Y[i1], Zb[i1] + z0));
-      ctx.lineTo(px(X[i1]), py(Y[i1], Zb[i1] + z1)); ctx.lineTo(px(X[i0]), py(Y[i0], Zb[i0] + z1)); ctx.closePath(); ctx.fill();
+      ctx.lineTo(px(X[i1]), py(Y[i1], Zb[i1] + z1)); ctx.lineTo(px(X[i0]), py(Y[i0], Zb[i0] + z1)); ctx.closePath(); ctx.fill(); ctx.stroke();
     }
-    var side = shade(colSide, 0.62 + 0.2 * Math.abs(ux)), end = shade(colSide, 0.62 + 0.2 * Math.abs(uy));
+    var side = shade(colSide, 0.66 + 0.2 * Math.abs(ux)), end = shade(colSide, 0.66 + 0.2 * Math.abs(uy));
     if (ux > 0) face(1, 3, side); else face(0, 2, side);     // långsidan vars normal pekar mot kameran
     if (uy > 0) face(2, 3, end); else face(0, 1, end);       // kortsidan
     ctx.fillStyle = colTop; ctx.beginPath();
     ctx.moveTo(px(X[0]), py(Y[0], Zb[0] + z1)); ctx.lineTo(px(X[1]), py(Y[1], Zb[1] + z1));
     ctx.lineTo(px(X[3]), py(Y[3], Zb[3] + z1)); ctx.lineTo(px(X[2]), py(Y[2], Zb[2] + z1)); ctx.closePath(); ctx.fill();
     if (tint > 0) { ctx.fillStyle = 'rgba(255,40,25,' + tint + ')'; ctx.fill(); }
+    ctx.stroke();
   }
+
+  /* ----- marken ----- */
+
+  // En gräsruta som upprepas: fält i olika gröna toner, tuvor och blommor. Ritas en gång och läggs sedan ut som plattor.
+  var grassTile = null, TILE = 48;
+  function makeGrass() {
+    var w = 512, h = 318, c = document.createElement('canvas'); c.width = w; c.height = h;
+    var g = c.getContext('2d'), R = rng(4711), i;
+    function wrap(x, y, fn) { for (var a = -1; a <= 1; a++) for (var b = -1; b <= 1; b++) fn(x + a * w, y + b * h); }
+    g.fillStyle = '#62b54a'; g.fillRect(0, 0, w, h);
+    for (i = 0; i < 30; i++) (function () {
+      var x = R() * w, y = R() * h, rx = 26 + R() * 64, col = R() < 0.5 ? 'rgba(150,215,95,.25)' : 'rgba(40,130,60,.17)';
+      wrap(x, y, function (a, b) { g.fillStyle = col; g.beginPath(); g.ellipse(a, b, rx, rx * 0.55, 0, 0, 6.3); g.fill(); });
+    })();
+    g.lineCap = 'round'; g.lineWidth = 1.7;
+    for (i = 0; i < 230; i++) (function () {
+      var x = R() * w, y = R() * h, col = R() < 0.5 ? 'rgba(38,120,52,.6)' : 'rgba(170,225,110,.6)';
+      wrap(x, y, function (a, b) { g.strokeStyle = col; g.beginPath(); g.moveTo(a - 3, b); g.lineTo(a - 4.5, b - 5); g.moveTo(a, b); g.lineTo(a, b - 6.5); g.moveTo(a + 3, b); g.lineTo(a + 4.5, b - 5); g.stroke(); });
+    })();
+    var fl = ['#ffffff', '#ffe04a', '#ff9ecb', '#ffffff', '#c9a6ff', '#ff7a5c'];
+    for (i = 0; i < 60; i++) (function () {
+      var x = R() * w, y = R() * h, col = fl[Math.floor(R() * fl.length)], r = 2.2 + R() * 1.6;
+      wrap(x, y, function (a, b) {
+        g.fillStyle = 'rgba(30,90,40,.35)'; g.beginPath(); g.arc(a + 0.8, b + 1, r, 0, 6.3); g.fill();
+        g.fillStyle = col; g.beginPath(); g.arc(a, b, r, 0, 6.3); g.fill();
+        g.fillStyle = col === '#ffe04a' ? '#e08a1e' : '#ffd23c'; g.beginPath(); g.arc(a, b, r * 0.38, 0, 6.3); g.fill();
+      });
+    })();
+    return c;
+  }
+  function drawGround() {
+    if (!grassTile) grassTile = makeGrass();
+    var i0 = Math.floor((-OX / S) / TILE), i1 = Math.floor(((W - OX) / S) / TILE);
+    var j0 = Math.floor((-OY / S / TY) / TILE), j1 = Math.floor(((H - OY) / S / TY) / TILE);
+    for (var i = i0; i <= i1; i++) for (var j = j0; j <= j1; j++) {
+      var xa = Math.round(px(i * TILE)), xb = Math.round(px((i + 1) * TILE)), ya = Math.round(OY + j * TILE * TY * S), yb = Math.round(OY + (j + 1) * TILE * TY * S);
+      ctx.drawImage(grassTile, xa, ya, xb - xa, yb - ya);
+    }
+  }
+
+  /* ----- landskapets föremål ----- */
+
+  function drawPond(o) {
+    var x = px(o.x), y = py(o.y, 0), rx = o.r * S, ry = o.r * 0.72 * S * TY;
+    ctx.fillStyle = '#e3d3a0'; ctx.beginPath(); ctx.ellipse(x, y, rx + 0.9 * S, ry + 0.7 * S, 0, 0, 6.3); ctx.fill();
+    ctx.fillStyle = '#3f9fd8'; ctx.beginPath(); ctx.ellipse(x, y, rx, ry, 0, 0, 6.3); ctx.fill(); ctx.strokeStyle = INK; ctx.lineWidth = LW; ctx.stroke();
+    ctx.fillStyle = '#62bdee'; ctx.beginPath(); ctx.ellipse(x - rx * 0.12, y - ry * 0.14, rx * 0.74, ry * 0.68, 0, 0, 6.3); ctx.fill();
+    // ringar på vattnet som sakta växer
+    ctx.strokeStyle = 'rgba(255,255,255,.55)'; ctx.lineWidth = Math.max(1, 0.14 * S);
+    for (var k = 0; k < 2; k++) {
+      var f = ((NOW * 0.25 + o.v + k * 0.5) % 1), cx = x + (k ? 0.3 : -0.35) * rx, cy = y + (k ? -0.2 : 0.15) * ry;
+      ctx.globalAlpha = 1 - f; ctx.beginPath(); ctx.ellipse(cx, cy, rx * 0.3 * f + 1, ry * 0.3 * f + 0.6, 0, 0, 6.3); ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+    for (k = 0; k < 3; k++) { // näckrosblad
+      var a = o.v * 6 + k * 2.2, lx = x + Math.cos(a) * rx * 0.55, ly = y + Math.sin(a) * ry * 0.5;
+      ctx.fillStyle = '#3d9a45'; ctx.beginPath(); ctx.ellipse(lx, ly, 0.75 * S, 0.5 * S, 0, 0.5, 6.0); ctx.lineTo(lx, ly); ctx.fill();
+      if (k === 0) disc(lx + 0.2 * S, ly - 0.1 * S, 0.28 * S, '#ffb7d9');
+    }
+  }
+
+  function drawTree(t) {
+    var x = px(t.x), y = py(t.y, 0), r = t.r * S, hh = t.h * TZ * S, sway = Math.sin(NOW * 1.3 + t.v * 9) * 0.05 * r;
+    groundShadow(t.x, t.y, t.r * 1.05, t.r * 0.8);
+    ctx.lineWidth = LW; ctx.strokeStyle = INK;
+    ctx.fillStyle = t.k === 3 ? '#f1eee4' : '#7a5330'; ctx.beginPath(); ctx.rect(x - 0.3 * S, y - hh * 0.55, 0.6 * S, hh * 0.55); ctx.fill(); ctx.stroke();
+    if (t.k === 1) { // gran
+      for (var k = 0; k < 3; k++) {
+        var yy = y - hh * (0.28 + k * 0.27), rr = r * (1 - k * 0.24);
+        ctx.fillStyle = shade(t.c, 0.74 + k * 0.16); ctx.beginPath(); ctx.moveTo(x - rr, yy); ctx.lineTo(x + rr, yy); ctx.lineTo(x + sway * (k + 1), yy - hh * 0.44); ctx.closePath(); ctx.fill(); ctx.stroke();
+      }
+      return;
+    }
+    var cy = y - hh * 0.74, col = t.k === 3 ? '#8fd06a' : t.c;
+    disc(x + sway, cy + r * 0.16, r, shade(col, 0.8), true);
+    disc(x - r * 0.16 + sway, cy - r * 0.12, r * 0.8, col);
+    disc(x - r * 0.3 + sway, cy - r * 0.34, r * 0.4, shade(col, 1.25));
+    if (t.k === 2) for (k = 0; k < 5; k++) { // äppelträd
+      var a = t.v * 6 + k * 1.3;
+      disc(x + sway + Math.cos(a) * r * 0.55, cy + Math.sin(a) * r * 0.5, Math.max(1.2, 0.22 * S), '#e63b2e');
+    }
+  }
+  function drawBush(o) {
+    var x = px(o.x), y = py(o.y, 0), r = o.r * S;
+    groundShadow(o.x, o.y, o.r * 1.2, o.r * 0.6);
+    disc(x - r * 0.6, y - r * 0.5, r * 0.75, shade(o.c, 0.82), true);
+    disc(x + r * 0.55, y - r * 0.55, r * 0.8, shade(o.c, 0.9), true);
+    disc(x, y - r * 0.85, r * 0.9, o.c, true);
+    disc(x - r * 0.25, y - r * 1.1, r * 0.35, shade(o.c, 1.25));
+    if (o.v < 0.35) { disc(x + r * 0.3, y - r * 0.6, Math.max(1, 0.16 * S), '#ff6f91'); disc(x - r * 0.5, y - r * 0.8, Math.max(1, 0.16 * S), '#ff6f91'); }
+  }
+  function drawRock(o) {
+    var x = px(o.x), y = py(o.y, 0), r = o.r * S;
+    groundShadow(o.x, o.y, o.r * 1.1, o.r * 0.6);
+    ctx.beginPath(); ctx.moveTo(x - r, y); ctx.lineTo(x - r * 0.7, y - r * 0.8); ctx.lineTo(x - r * 0.1, y - r * 1.15); ctx.lineTo(x + r * 0.7, y - r * 0.75); ctx.lineTo(x + r, y); ctx.closePath();
+    ctx.fillStyle = '#9aa1ab'; ctx.fill(); ctx.strokeStyle = INK; ctx.lineWidth = LW; ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(x - r * 0.6, y - r * 0.7); ctx.lineTo(x - r * 0.1, y - r * 1.05); ctx.lineTo(x + r * 0.15, y - r * 0.55); ctx.closePath(); ctx.fillStyle = '#c3c9d1'; ctx.fill();
+  }
+  function drawHay(o) {
+    var x = px(o.x), y = py(o.y, 0), r = 1.0 * S;
+    groundShadow(o.x, o.y, 1.3, 0.8);
+    ctx.fillStyle = '#d9a93a'; ctx.strokeStyle = INK; ctx.lineWidth = LW;
+    ctx.beginPath(); ctx.rect(x - r * 1.1, y - r * 1.5, r * 2.2, r * 1.5); ctx.fill(); ctx.stroke();
+    ctx.beginPath(); ctx.ellipse(x - r * 1.1, y - r * 0.75, r * 0.5, r * 0.75, 0, 0, 6.3); ctx.fillStyle = '#f0c95a'; ctx.fill(); ctx.stroke();
+    ctx.beginPath(); ctx.ellipse(x - r * 1.1, y - r * 0.75, r * 0.2, r * 0.3, 0, 0, 6.3); ctx.stroke();
+  }
+  function drawSheep(o, cow) {
+    var x = px(o.x), y = py(o.y, 0), u = S * (cow ? 1.25 : 1), f = o.f, bob = Math.abs(Math.sin(NOW * 1.6 + o.v * 20)) * 0.12 * u;
+    groundShadow(o.x, o.y, cow ? 1.5 : 1.1, 0.6);
+    ctx.strokeStyle = '#2a2a30'; ctx.lineWidth = Math.max(1.2, 0.22 * u); ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(x - 0.5 * u, y - 0.5 * u); ctx.lineTo(x - 0.5 * u, y); ctx.moveTo(x + 0.5 * u, y - 0.5 * u); ctx.lineTo(x + 0.5 * u, y); ctx.stroke();
+    if (cow) {
+      ctx.beginPath(); ctx.ellipse(x, y - 0.95 * u, 1.05 * u, 0.6 * u, 0, 0, 6.3); ctx.fillStyle = '#fbfaf5'; ctx.fill(); ctx.strokeStyle = INK; ctx.lineWidth = LW; ctx.stroke();
+      ctx.fillStyle = '#33333a';
+      ctx.beginPath(); ctx.ellipse(x - 0.35 * u * f, y - 1.05 * u, 0.36 * u, 0.28 * u, 0.4, 0, 6.3); ctx.fill();
+      ctx.beginPath(); ctx.ellipse(x + 0.4 * u * f, y - 0.8 * u, 0.25 * u, 0.2 * u, 0, 0, 6.3); ctx.fill();
+      disc(x + 1.1 * u * f, y - 1.25 * u + bob, 0.42 * u, '#fbfaf5', true);
+      disc(x + 1.3 * u * f, y - 1.12 * u + bob, 0.22 * u, '#f5a9b8');
+    } else {
+      disc(x - 0.45 * u, y - 0.85 * u, 0.55 * u, '#fdfdf8', true); disc(x + 0.4 * u, y - 0.85 * u, 0.55 * u, '#fdfdf8', true);
+      disc(x, y - 1.05 * u, 0.62 * u, '#fdfdf8', true); disc(x, y - 0.8 * u, 0.5 * u, '#fdfdf8');
+      disc(x + 0.95 * u * f, y - 1.0 * u + bob, 0.34 * u, '#33333a');
+    }
+  }
+  function drawHouse(o) {
+    var ux = Math.cos(o.a), uy = Math.sin(o.a), hl = o.hl, hw = o.hw, h = o.h, rh = o.rh, x = o.x, y = o.y;
+    var e = uy > 0 ? 1 : -1, ov = 0.45; // e = gaveln som syns från kameran
+    groundShadow(x + 1.5, y + 0.5, hl * 1.15, hw * 1.2);
+    box(x, y, 0, ux, uy, 0, hl, hw, 0, h, o.roof, o.c, 0);
+    function wall(a0, a1, z0, z1, col) { // rektangel på långsidan mot kameran (ux > 0 för alla hus)
+      poly([x + ux * a0 - uy * hw, y + uy * a0 + ux * hw, z0, x + ux * a1 - uy * hw, y + uy * a1 + ux * hw, z0,
+        x + ux * a1 - uy * hw, y + uy * a1 + ux * hw, z1, x + ux * a0 - uy * hw, y + uy * a0 + ux * hw, z1], col, true);
+    }
+    if (o.barn) { wall(-1.5, 1.5, 0, 3.2, '#f4f0e4'); wall(-1.3, 1.3, 0, 3.0, '#8e2b23'); }
+    else { wall(-0.5, 0.5, 0, 2.0, '#6b4a2e'); wall(-hl + 0.7, -hl + 1.9, 1.1, 2.2, '#bfe9ff'); wall(hl - 1.9, hl - 0.7, 1.1, 2.2, '#bfe9ff'); }
+    // gavel, sedan takets bortre och hitre sida
+    var gx = x + ux * hl * e, gy = y + uy * hl * e;
+    poly([gx - uy * hw, gy + ux * hw, h, gx + uy * hw, gy - ux * hw, h, gx, gy, h + rh], shade(o.c, 0.66 + 0.2 * Math.abs(uy)), true);
+    var L = hl + ov, Wd = hw + ov;
+    poly([x - ux * L + uy * Wd, y - uy * L - ux * Wd, h - 0.2, x + ux * L + uy * Wd, y + uy * L - ux * Wd, h - 0.2, x + ux * L, y + uy * L, h + rh, x - ux * L, y - uy * L, h + rh], shade(o.roof, 0.75), true);
+    poly([x - ux * L - uy * Wd, y - uy * L + ux * Wd, h - 0.2, x + ux * L - uy * Wd, y + uy * L + ux * Wd, h - 0.2, x + ux * L, y + uy * L, h + rh, x - ux * L, y - uy * L, h + rh], o.roof, true);
+    if (!o.barn) box(x + ux * hl * 0.45, y + uy * hl * 0.45, 0, ux, uy, 0, 0.4, 0.4, h + rh * 0.55, h + rh + 0.9, '#8b8f99', '#a9584a', 0);
+  }
+  function drawMill(o) {
+    var x = px(o.x), y = py(o.y, 0), u = S, top = y - 8.5 * TZ * u;
+    groundShadow(o.x + 1, o.y, 2.6, 1.8);
+    ctx.lineWidth = LW; ctx.strokeStyle = INK; ctx.lineJoin = 'round';
+    ctx.beginPath(); ctx.moveTo(x - 2 * u, y); ctx.lineTo(x + 2 * u, y); ctx.lineTo(x + 1.15 * u, top); ctx.lineTo(x - 1.15 * u, top); ctx.closePath(); ctx.fillStyle = '#f5eeda'; ctx.fill(); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(x + 0.6 * u, y); ctx.lineTo(x + 2 * u, y); ctx.lineTo(x + 1.15 * u, top); ctx.lineTo(x + 0.4 * u, top); ctx.closePath(); ctx.fillStyle = 'rgba(120,100,60,.22)'; ctx.fill();
+    ctx.fillStyle = '#6b4a2e'; ctx.beginPath(); ctx.rect(x - 0.5 * u, y - 1.7 * u, 1.0 * u, 1.7 * u); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = '#bfe9ff'; ctx.beginPath(); ctx.rect(x - 0.35 * u, y - 4.2 * u, 0.7 * u, 0.8 * u); ctx.fill(); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(x - 1.5 * u, top); ctx.lineTo(x + 1.5 * u, top); ctx.lineTo(x, top - 1.9 * u); ctx.closePath(); ctx.fillStyle = '#c9463a'; ctx.fill(); ctx.stroke();
+    var hy = top + 0.2 * u;
+    for (var k = 0; k < 4; k++) {
+      ctx.save(); ctx.translate(x, hy); ctx.rotate(NOW * 0.7 + o.v * 6 + k * Math.PI / 2);
+      ctx.fillStyle = '#fffbe9'; ctx.beginPath(); ctx.rect(0.7 * u, -0.1 * u, 4.6 * u, 1.05 * u); ctx.fill(); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(5.3 * u, 0); ctx.lineWidth = Math.max(1.5, 0.22 * u); ctx.strokeStyle = '#6b4a2e'; ctx.stroke();
+      ctx.restore(); ctx.lineWidth = LW; ctx.strokeStyle = INK;
+    }
+    disc(x, hy, 0.35 * u, '#6b4a2e', true);
+  }
+  function drawThing(o) {
+    switch (o.t) {
+      case 'tree': drawTree(o); break;
+      case 'bush': drawBush(o); break;
+      case 'rock': drawRock(o); break;
+      case 'hay': drawHay(o); break;
+      case 'sheep': drawSheep(o, false); break;
+      case 'cow': drawSheep(o, true); break;
+      case 'house': drawHouse(o); break;
+      case 'mill': drawMill(o); break;
+    }
+  }
+
+  /* ----- tåget ----- */
+
+  var WAGON_KINDS = ['coal', 'logs', 'box', 'tank', 'crates'];
 
   function drawCar(run, i) {
     var c = run.train.cars[i], p = carPose(run, i, {}), w = CFG.physics.warnAt;
     var tint = run.wreck ? 0 : Math.max(0, Math.min(0.75, (c.load - w) / (1 - w) * 0.75));
-    var hl = c.len / 2;
+    var hl = c.len / 2, sg = p.ux > 0 ? 1 : -1, nx = -p.uy * sg, ny = p.ux * sg; // (nx, ny) = sidan mot kameran
     // skugga på marken
-    ctx.fillStyle = 'rgba(0,0,0,.22)';
+    ctx.fillStyle = 'rgba(0,0,0,.24)';
     ctx.beginPath(); ctx.ellipse(px(p.x) + 3, py(p.y, p.z) + 3, (Math.abs(p.ux) * hl + Math.abs(p.uy) * 1.4 + .6) * S, (Math.abs(p.uy) * hl + Math.abs(p.ux) * 1.4 + .6) * S * TY, 0, 0, 6.3); ctx.fill();
-    box(p.x, p.y, p.z, p.ux, p.uy, p.sl, hl, 1.2, 0.25, 0.9, '#30323a', '#3a3d47', 0);
-    function part(off, len, hw, z0, z1, top, side, tn) {
-      box(p.x + p.ux * off, p.y + p.uy * off, p.z + p.sl * off, p.ux, p.uy, p.sl, len / 2, hw, z0, z1, top, side, tn);
-    }
+
     var parts = [];
+    // låda: off = läge längs fordonet, lat = sidled, ord = annan lådas off som den står på (styr ritordningen)
+    function bx(off, len, hw, z0, z1, top, side, tn, lat, ord) {
+      lat = lat || 0;
+      var o = ord === undefined ? off : ord, q = { d: o * p.uy + lat * p.ux, z: z1, deco: [], f: function () {
+        box(p.x + p.ux * off - p.uy * lat, p.y + p.uy * off + p.ux * lat, p.z + p.sl * off, p.ux, p.uy, p.sl, len / 2, hw, z0, z1, top, side, tn || 0);
+      } };
+      parts.push(q); return q;
+    }
+    // rektangel på långsidan mot kameran (fönster, dörrar, ränder)
+    function sideRect(part, o0, o1, hw, z0, z1, col) {
+      part.deco.push(function () {
+        var ax = p.x + p.ux * o0 + nx * hw, ay = p.y + p.uy * o0 + ny * hw, bxx = p.x + p.ux * o1 + nx * hw, by = p.y + p.uy * o1 + ny * hw;
+        poly([ax, ay, p.z + p.sl * o0 + z0, bxx, by, p.z + p.sl * o1 + z0, bxx, by, p.z + p.sl * o1 + z1, ax, ay, p.z + p.sl * o0 + z1], col, true);
+      });
+    }
+    // rektangel på gaveln (bara när gaveln vetter mot kameran)
+    function endRect(part, off, l0, l1, z0, z1, col) {
+      if ((off > 0) !== (p.uy > 0)) return;
+      part.deco.push(function () {
+        var cx = p.x + p.ux * off, cy = p.y + p.uy * off, cz = p.z + p.sl * off;
+        poly([cx - p.uy * l0, cy + p.ux * l0, cz + z0, cx - p.uy * l1, cy + p.ux * l1, cz + z0, cx - p.uy * l1, cy + p.ux * l1, cz + z1, cx - p.uy * l0, cy + p.ux * l0, cz + z1], col, true);
+      });
+    }
+    var wheels = [];
+    function wheel(off, r, hub) { wheels.push([off, r, hub]); }
+
+    bx(0, c.len - 0.2, 1.2, 0.35, 0.95, '#2b2e36', '#3a3d47');
+    var b, col;
     if (i > 0) {
-      var col = run.wagonCols[i - 1];
-      parts.push([0, c.len - 0.3, 1.3, 0.9, 2.3, i % 2 ? '#2b2b30' : '#6b4a2e', col, tint]);
-    } else {
-      var col0 = run.spec.color || '#2f6b3a', st = run.spec.style;
-      if (st === 'steam') {
-        parts.push([-2.9, 3.0, 1.35, 0.9, 3.3, shade(col0, 0.8), col0, tint]);       // hytt
-        parts.push([1.5, 5.8, 1.05, 0.9, 2.6, shade(col0, 1.25), col0, tint]);       // panna
-        parts.push([3.1, 0.9, 0.42, 2.6, 3.7, '#1d1d20', '#2a2a2e', 0]);             // skorsten
-        parts.push([0.6, 0.9, 0.5, 2.6, 3.0, '#d9b23c', '#b38f24', 0]);              // dom
-      } else if (st === 'diesel') {
-        parts.push([-1.0, 6.6, 1.2, 0.9, 2.7, shade(col0, 1.2), col0, tint]);        // motorhuv
-        parts.push([3.2, 2.4, 1.35, 0.9, 3.3, '#e9e4d2', col0, tint]);               // hytt fram
-        parts.push([-1.4, 1.0, 0.5, 2.7, 3.1, '#2a2a2e', '#333', 0]);                // avgasrör
+      col = run.wagonCols[i - 1];
+      var kind = WAGON_KINDS[(i - 1) % WAGON_KINDS.length];
+      if (kind === 'box') {
+        b = bx(0, 5.6, 1.3, 0.95, 2.85, shade(col, 0.9), col, tint);
+        sideRect(b, -0.9, 0.9, 1.31, 1.1, 2.7, shade(col, 0.72));
+        bx(0, 5.8, 1.42, 2.85, 3.02, '#e3ded0', '#aaa59a', tint);
+      } else if (kind === 'coal') {
+        b = bx(0, 5.6, 1.3, 0.95, 2.1, '#25262b', col, tint);
+        sideRect(b, -2.6, -2.35, 1.31, 0.95, 2.1, shade(col, 0.7)); sideRect(b, -0.12, 0.12, 1.31, 0.95, 2.1, shade(col, 0.7)); sideRect(b, 2.35, 2.6, 1.31, 0.95, 2.1, shade(col, 0.7));
+        bx(0, 4.7, 0.95, 2.1, 2.4, '#3a3b42', '#25262b', 0);
+        bx(0.3, 2.6, 0.55, 2.4, 2.66, '#474851', '#2e2f35', 0);
+      } else if (kind === 'logs') {
+        bx(0, 5.6, 1.3, 0.95, 1.15, '#6b4a2e', col, tint);
+        [-0.8, 0, 0.8].forEach(function (lat) { bx(0, 5.3, 0.37, 1.15, 1.88, '#c08a4c', '#8f5f2e', 0, lat); });
+        [-0.4, 0.4].forEach(function (lat) { bx(0, 5.0, 0.37, 1.88, 2.6, '#cc9658', '#99682f', 0, lat); });
+      } else if (kind === 'tank') {
+        b = bx(0, 5.2, 1.08, 1.0, 2.5, '#f2f4f7', '#d3d8df', tint);
+        sideRect(b, -0.7, 0.7, 1.09, 1.0, 2.5, col);
+        bx(0, 5.2, 0.55, 2.5, 2.7, '#ffffff', '#e6eaef', 0);
+        bx(0, 0.9, 0.42, 2.7, 3.02, '#8d929b', '#6f747d', 0);
       } else {
-        parts.push([0, 8.6, 1.3, 0.9, 3.0, shade(col0, 1.25), col0, tint]);          // kaross
-        parts.push([3.6, 1.2, 1.32, 2.0, 3.02, '#bfe3f5', '#9fd0ea', 0]);            // frontruta
-        parts.push([-0.5, 2.6, 0.5, 3.0, 3.5, '#888c94', '#6b6f77', 0]);             // strömavtagare
+        bx(0, 5.6, 1.3, 0.95, 1.15, '#6b4a2e', col, tint);
+        b = bx(-1.6, 2.2, 1.05, 1.15, 2.55, '#f0b95a', '#d19a35', 0); sideRect(b, -2.5, -0.7, 1.06, 1.75, 1.95, '#a9772a');
+        b = bx(1.0, 2.4, 1.1, 1.15, 2.25, '#7fc0e6', '#5a9fc8', 0); sideRect(b, 0.0, 2.0, 1.11, 1.6, 1.8, '#3f7fa8');
+        bx(1.0, 1.3, 0.65, 2.25, 2.95, '#f08a7d', '#d2685c', 0);
+      }
+      wheel(-2.25, 0.44, '#9aa0aa'); wheel(-1.35, 0.44, '#9aa0aa'); wheel(1.35, 0.44, '#9aa0aa'); wheel(2.25, 0.44, '#9aa0aa');
+    } else {
+      col = run.spec.color || '#2f6b3a';
+      var st = run.spec.style, dark = '#23252b', glass = '#bfe9ff';
+      if (st === 'steam') {
+        b = bx(-2.9, 2.8, 1.35, 0.95, 3.15, shade(col, 0.85), col, tint);                       // hytt
+        sideRect(b, -3.75, -2.05, 1.36, 2.0, 2.85, glass);
+        bx(-2.9, 3.4, 1.52, 3.15, 3.36, '#454955', '#2b2e36', 0);                                // hyttens tak
+        b = bx(1.25, 5.5, 1.0, 0.95, 2.55, shade(col, 1.15), col, tint);                         // panna
+        [-0.6, 1.2, 3.0].forEach(function (o) { sideRect(b, o - 0.1, o + 0.1, 1.01, 0.95, 2.55, '#f1cf55'); });
+        bx(1.25, 5.5, 0.5, 2.55, 2.74, shade(col, 1.45), shade(col, 1.2), tint);                 // pannans rundade topp
+        b = bx(4.15, 0.55, 1.03, 0.95, 2.58, '#2e3038', dark, 0);                                // rökskåp
+        endRect(b, 4.43, -0.32, 0.32, 1.85, 2.4, '#ffe98a');                                     // lykta
+        bx(3.35, 0.7, 0.36, 2.74, 3.75, '#1c1d22', '#2c2e35', 0, 0, 1.25);                       // skorsten
+        bx(3.35, 0.98, 0.5, 3.75, 3.95, '#3a3d47', dark, 0, 0, 1.25);
+        bx(1.15, 0.9, 0.42, 2.74, 3.18, '#f6d968', '#cfa92f', 0, 0, 1.25);                       // dom
+        bx(4.6, 0.45, 1.15, 0.15, 0.85, '#e0564a', '#b83a30', 0);                                // kofångare
+        wheel(-3.3, 0.46, '#e0564a'); wheel(-1.7, 0.7, '#e0564a'); wheel(-0.1, 0.7, '#e0564a'); wheel(1.5, 0.7, '#e0564a'); wheel(3.1, 0.44, '#e0564a'); wheel(3.95, 0.44, '#e0564a');
+      } else if (st === 'diesel') {
+        b = bx(-1.2, 6.2, 1.1, 0.95, 2.55, shade(col, 1.18), col, tint);                         // motorhuv
+        sideRect(b, -4.25, 1.85, 1.11, 1.45, 1.75, '#fff6d8');
+        [-3.5, -2.5, -1.5].forEach(function (o) { sideRect(b, o - 0.3, o + 0.3, 1.11, 1.9, 2.4, '#3a3d47'); });
+        bx(-0.6, 1.5, 0.6, 2.55, 2.68, '#454955', '#2b2e36', 0, 0, -1.2);                        // fläkt
+        bx(-2.6, 0.6, 0.3, 2.55, 3.05, '#1c1d22', '#2c2e35', 0, 0, -1.2);                        // avgasrör
+        b = bx(3.05, 2.6, 1.35, 0.95, 3.15, '#f6f1df', col, tint);                               // hytt
+        sideRect(b, 2.1, 4.0, 1.36, 2.05, 2.9, glass);
+        endRect(b, 4.35, -1.05, 1.05, 2.05, 2.9, glass); endRect(b, 4.35, -1.0, -0.5, 1.15, 1.5, '#ffe98a'); endRect(b, 4.35, 0.5, 1.0, 1.15, 1.5, '#ffe98a');
+        bx(3.05, 2.9, 1.47, 3.15, 3.33, '#454955', '#2b2e36', 0);
+        wheel(-3.3, 0.5, '#c9ccd3'); wheel(-2.2, 0.5, '#c9ccd3'); wheel(2.2, 0.5, '#c9ccd3'); wheel(3.3, 0.5, '#c9ccd3');
+      } else {
+        b = bx(0, 8.6, 1.3, 0.95, 3.0, shade(col, 1.2), col, tint);                              // kaross
+        sideRect(b, -4.3, 4.3, 1.31, 1.3, 1.62, '#fff6d8');
+        [-2.7, -1.5, -0.3, 0.9].forEach(function (o) { sideRect(b, o - 0.4, o + 0.4, 1.31, 2.05, 2.7, glass); });
+        sideRect(b, 2.9, 4.0, 1.31, 2.0, 2.75, glass);
+        endRect(b, 4.3, -1.0, 1.0, 2.0, 2.8, glass); endRect(b, 4.3, -1.0, -0.5, 1.15, 1.5, '#ffe98a'); endRect(b, 4.3, 0.5, 1.0, 1.15, 1.5, '#ffe98a');
+        b = bx(0, 8.0, 1.0, 3.0, 3.16, '#a7adb8', '#7d828c', 0);                                 // tak
+        b.deco.push(function () {                                                                // strömavtagare
+          ctx.strokeStyle = '#2b2e36'; ctx.lineWidth = Math.max(1.5, 0.2 * S); ctx.lineCap = 'round'; ctx.beginPath();
+          var o0 = -1.6, o1 = -0.6, o2 = 0.4;
+          ctx.moveTo(px(p.x + p.ux * o0), py(p.y + p.uy * o0, p.z + 3.16)); ctx.lineTo(px(p.x + p.ux * o1), py(p.y + p.uy * o1, p.z + 4.1)); ctx.lineTo(px(p.x + p.ux * o2), py(p.y + p.uy * o2, p.z + 3.16));
+          ctx.moveTo(px(p.x + p.ux * o1 - p.uy * 0.9), py(p.y + p.uy * o1 + p.ux * 0.9, p.z + 4.1)); ctx.lineTo(px(p.x + p.ux * o1 + p.uy * 0.9), py(p.y + p.uy * o1 - p.ux * 0.9, p.z + 4.1));
+          ctx.stroke();
+        });
+        wheel(-3.3, 0.5, '#c9ccd3'); wheel(-2.2, 0.5, '#c9ccd3'); wheel(2.2, 0.5, '#c9ccd3'); wheel(3.3, 0.5, '#c9ccd3');
       }
     }
-    // delarna längst från kameran först
-    parts.sort(function (a, b) { return a[0] * p.uy - b[0] * p.uy; });
-    parts.forEach(function (q) { part.apply(null, q); });
+    // delarna längst från kameran först, lägre delar före högre
+    parts.sort(function (a, b2) { return (a.d - b2.d) || (a.z - b2.z); });
+    parts.forEach(function (q) { q.f(); for (var n = 0; n < q.deco.length; n++) q.deco[n](); });
+    // hjulen på sidan mot kameran; ekern snurrar med farten
+    for (var n = 0; n < wheels.length; n++) {
+      var off = wheels[n][0], r = wheels[n][1];
+      var cx = px(p.x + p.ux * off + nx * 1.27), cy = py(p.y + p.uy * off + ny * 1.27, p.z + p.sl * off + r + 0.04);
+      var ax = p.ux * S * r, ay = p.uy * TY * S * r, by = -TZ * S * r;
+      ctx.save(); ctx.transform(ax, ay, 0, by, cx, cy); ctx.beginPath(); ctx.arc(0, 0, 1, 0, 6.3); ctx.restore();
+      ctx.fillStyle = '#1d1f25'; ctx.fill(); ctx.strokeStyle = INK; ctx.lineWidth = LW; ctx.stroke();
+      ctx.save(); ctx.transform(ax, ay, 0, by, cx, cy); ctx.beginPath(); ctx.arc(0, 0, 0.6, 0, 6.3); ctx.restore();
+      ctx.fillStyle = wheels[n][2]; ctx.fill();
+      var ph = c.s / r, co = Math.cos(ph) * 0.6, si = Math.sin(ph) * 0.6;
+      ctx.strokeStyle = '#1d1f25'; ctx.lineWidth = Math.max(1, 0.12 * S); ctx.beginPath();
+      ctx.moveTo(cx - ax * co, cy - ay * co - by * si); ctx.lineTo(cx + ax * co, cy + ay * co + by * si);
+      ctx.moveTo(cx + ax * si, cy + ay * si - by * co); ctx.lineTo(cx - ax * si, cy - ay * si + by * co); ctx.stroke();
+    }
   }
 
   function drawSpring(run, j) {
@@ -548,90 +944,101 @@
     ctx.lineWidth = Math.max(1.4, 0.3 * S); ctx.stroke();
   }
 
-  function drawTree(t) {
-    var x = px(t.x), y = py(t.y, 0);
-    ctx.fillStyle = 'rgba(0,0,0,.18)'; ctx.beginPath(); ctx.ellipse(x + t.r * S * .5, y + 1, t.r * S * 1.05, t.r * S * .5, 0, 0, 6.3); ctx.fill();
-    ctx.fillStyle = '#5a4128'; ctx.fillRect(x - .28 * S, y - t.h * .5 * TZ * S, .56 * S, t.h * .5 * TZ * S);
-    if (t.pine) {
-      for (var k = 0; k < 3; k++) {
-        var yy = y - (t.h * (.3 + k * .28)) * TZ * S, rr = t.r * (1 - k * .25) * S;
-        ctx.fillStyle = shade(t.c, .8 + k * .18); ctx.beginPath(); ctx.moveTo(x - rr, yy); ctx.lineTo(x + rr, yy); ctx.lineTo(x, yy - t.h * .42 * TZ * S); ctx.closePath(); ctx.fill();
-      }
-    } else {
-      var cy = y - t.h * .72 * TZ * S;
-      ctx.fillStyle = shade(t.c, .78); ctx.beginPath(); ctx.arc(x, cy + t.r * S * .18, t.r * S, 0, 6.3); ctx.fill();
-      ctx.fillStyle = t.c; ctx.beginPath(); ctx.arc(x - t.r * S * .15, cy - t.r * S * .12, t.r * S * .82, 0, 6.3); ctx.fill();
-      ctx.fillStyle = shade(t.c, 1.22); ctx.beginPath(); ctx.arc(x - t.r * S * .3, cy - t.r * S * .32, t.r * S * .42, 0, 6.3); ctx.fill();
-    }
-  }
-
   // Målflagga på en stolpe bredvid start- och mållinjen (alltid vänd mot kameran).
   function drawGate(tr) {
     var p = tr.at(0, P1), sd = p.tx > 0 ? -1 : 1, fx = p.x - p.ty * 4.2 * sd, fy = p.y + p.tx * 4.2 * sd;
-    var x = px(fx), y0 = py(fy, p.z), y1 = py(fy, p.z + 7.5), c = 0.75 * S;
+    var x = px(fx), y0 = py(fy, p.z), y1 = py(fy, p.z + 7.5), c = 0.75 * S, wave = Math.sin(NOW * 3) * 0.12 * S;
     ctx.fillStyle = 'rgba(0,0,0,.2)'; ctx.beginPath(); ctx.ellipse(x + 2, y0, 1.1 * S, .5 * S, 0, 0, 6.3); ctx.fill();
-    ctx.strokeStyle = '#e9ecf1'; ctx.lineWidth = Math.max(2, .32 * S); ctx.lineCap = 'round';
+    ctx.strokeStyle = '#2b2e36'; ctx.lineWidth = Math.max(3, .46 * S); ctx.lineCap = 'round';
     ctx.beginPath(); ctx.moveTo(x, y0); ctx.lineTo(x, y1); ctx.stroke();
+    ctx.strokeStyle = '#f4f6f9'; ctx.lineWidth = Math.max(2, .28 * S); ctx.stroke();
     for (var r = 0; r < 3; r++) for (var i = 0; i < 4; i++) {
-      ctx.fillStyle = (i + r) % 2 ? '#111' : '#fff'; ctx.fillRect(x + i * c, y1 + r * c, c + .5, c + .5);
+      ctx.fillStyle = (i + r) % 2 ? '#111' : '#fff'; ctx.fillRect(x + i * c, y1 + r * c + wave * i / 3, c + .5, c + .5);
     }
+    ctx.strokeStyle = INK; ctx.lineWidth = LW; ctx.strokeRect(x, y1, 4 * c, 3 * c + wave);
   }
 
   function render() {
     ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
-    if (!run) { ctx.fillStyle = '#3f7a3a'; ctx.fillRect(0, 0, W, H); return; }
-    var tr = run.data.tr, N = tr.N, i, j, cam = run.cam;
+    if (!run) { ctx.fillStyle = '#62b54a'; ctx.fillRect(0, 0, W, H); return; }
+    var data = run.data, tr = data.tr, N = tr.N, span = data.span, i, k, cam = run.cam;
     S = W / ((CFG.view && CFG.view.meters) || 150);
+    LW = Math.max(1, 0.14 * S);
     var shx = run.shake ? (Math.random() - .5) * run.shake * 14 : 0, shy = run.shake ? (Math.random() - .5) * run.shake * 14 : 0;
     OX = W / 2 - cam.x * S + shx; OY = H * 0.56 - (cam.y * TY - cam.z * TZ) * S + shy;
 
-    // mark: gräs i stora rutor så att farten syns
-    ctx.fillStyle = '#4a8f3f'; ctx.fillRect(0, 0, W, H);
-    var T = 22, x0 = Math.floor((-OX / S) / T), x1 = Math.floor(((W - OX) / S) / T), y0 = Math.floor((-OY / S / TY) / T), y1 = Math.floor(((H - OY) / S / TY) / T);
-    ctx.fillStyle = '#458839';
-    for (i = x0; i <= x1; i++) for (j = y0; j <= y1; j++) if ((i + j) & 1) ctx.fillRect(px(i * T), OY + j * T * TY * S, T * S + 1, T * TY * S + 1);
+    drawGround();
 
-    function vis(k) { var sx = px(tr.x[k]), sy = py(tr.y[k], tr.z[k]); return sx > -60 && sx < W + 60 && sy > -60 && sy < H + 120; }
-    var BW = 2.1; // ballastens halva bredd
-    function quad(k, z, grow) {
-      var m = (k + 1) % N, w = BW + grow, ax = -tr.ty[k] * w, ay = tr.tx[k] * w, bx = -tr.ty[m] * w, by = tr.tx[m] * w;
-      var zk = z ? tr.z[k] : 0, zm = z ? tr.z[m] : 0;
-      ctx.moveTo(px(tr.x[k] + ax), py(tr.y[k] + ay, zk)); ctx.lineTo(px(tr.x[m] + bx), py(tr.y[m] + by, zm));
-      ctx.lineTo(px(tr.x[m] - bx), py(tr.y[m] - by, zm)); ctx.lineTo(px(tr.x[k] - ax), py(tr.y[k] - ay, zk)); ctx.closePath();
+    // landskapets föremål i de rutor som syns: dammar ligger på marken, resten sorteras in bland fordonen
+    var items = [], ca = Math.floor((-OX / S - 14) / CELL), cb = Math.floor(((W - OX) / S + 14) / CELL);
+    var ra = Math.floor((-OY / S / TY - 8) / CELL), rb = Math.floor(((H - OY) / S / TY + 16) / CELL);
+    for (i = ca; i <= cb; i++) for (k = ra; k <= rb; k++) {
+      var cell = data.cells[i + ',' + k];
+      if (!cell) continue;
+      for (var n = 0; n < cell.length; n++) { if (cell[n].g) drawPond(cell[n]); else items.push([cell[n].y, 0, cell[n]]); }
     }
-    // banvall: jordfyllning under spår som ligger högt, ritad bortifrån och framåt
-    if (tr.maxZ > 0.15) {
-      for (var o = 0; o < N; o++) {
-        i = run.data.order[o];
-        if (tr.z[i] < 0.12 || !vis(i)) continue;
-        var m = (i + 1) % N, zz = tr.z[i], zm = tr.z[m], sp = 0.5 + zz * 0.45; // släntens bredd växer med höjden
-        ctx.fillStyle = '#6f5a3e'; ctx.beginPath();
-        quad(i, false, sp);
-        // väggarna mellan fot och krön
-        var w0 = BW + sp, w1 = BW;
-        for (var sgn = -1; sgn <= 1; sgn += 2) {
-          ctx.moveTo(px(tr.x[i] - tr.ty[i] * w0 * sgn), py(tr.y[i] + tr.tx[i] * w0 * sgn, 0)); ctx.lineTo(px(tr.x[m] - tr.ty[m] * w0 * sgn), py(tr.y[m] + tr.tx[m] * w0 * sgn, 0));
-          ctx.lineTo(px(tr.x[m] - tr.ty[m] * w1 * sgn), py(tr.y[m] + tr.tx[m] * w1 * sgn, zm)); ctx.lineTo(px(tr.x[i] - tr.ty[i] * w1 * sgn), py(tr.y[i] + tr.tx[i] * w1 * sgn, zz)); ctx.closePath();
+
+    function vis(q) { var sx = px(tr.x[q]), sy = py(tr.y[q], tr.z[q]); return sx > -60 && sx < W + 60 && sy > -60 && sy < H + 120; }
+    function quad(q, z, grow) {
+      var m = (q + 1) % N, w = BW + grow, ax = -tr.ty[q] * w, ay = tr.tx[q] * w, bx = -tr.ty[m] * w, by = tr.tx[m] * w;
+      var zk = z ? tr.z[q] : 0, zm = z ? tr.z[m] : 0;
+      ctx.moveTo(px(tr.x[q] + ax), py(tr.y[q] + ay, zk)); ctx.lineTo(px(tr.x[m] + bx), py(tr.y[m] + by, zm));
+      ctx.lineTo(px(tr.x[m] - bx), py(tr.y[m] - by, zm)); ctx.lineTo(px(tr.x[q] - ax), py(tr.y[q] - ay, zk)); ctx.closePath();
+    }
+    // banvall under ett spårstycke som ligger högt: jordfyllning (eller gräskulle över en tunnel) och ballast överst
+    function embank(q, grass, wide) {
+      var m = (q + 1) % N, zz = tr.z[q], zm = tr.z[m], sp = 0.5 + zz * (0.45 + (HILL - 0.45) * (wide || 0)); // släntens bredd växer med höjden
+      ctx.fillStyle = grass ? '#3f8f3c' : '#7a6243'; ctx.beginPath();
+      quad(q, false, sp);
+      var w0 = BW + sp, w1 = BW;
+      for (var sgn = -1; sgn <= 1; sgn += 2) {
+        ctx.moveTo(px(tr.x[q] - tr.ty[q] * w0 * sgn), py(tr.y[q] + tr.tx[q] * w0 * sgn, 0)); ctx.lineTo(px(tr.x[m] - tr.ty[m] * w0 * sgn), py(tr.y[m] + tr.tx[m] * w0 * sgn, 0));
+        ctx.lineTo(px(tr.x[m] - tr.ty[m] * w1 * sgn), py(tr.y[m] + tr.tx[m] * w1 * sgn, zm)); ctx.lineTo(px(tr.x[q] - tr.ty[q] * w1 * sgn), py(tr.y[q] + tr.tx[q] * w1 * sgn, zz)); ctx.closePath();
+      }
+      ctx.fill();
+      var sg2 = tr.tx[q] > 0 ? 1 : -1; // slänten som vetter mot kameran lite ljusare
+      ctx.fillStyle = grass ? '#55a84a' : '#a08458'; ctx.beginPath();
+      ctx.moveTo(px(tr.x[q] - tr.ty[q] * w0 * sg2), py(tr.y[q] + tr.tx[q] * w0 * sg2, 0)); ctx.lineTo(px(tr.x[m] - tr.ty[m] * w0 * sg2), py(tr.y[m] + tr.tx[m] * w0 * sg2, 0));
+      ctx.lineTo(px(tr.x[m] - tr.ty[m] * w1 * sg2), py(tr.y[m] + tr.tx[m] * w1 * sg2, zm)); ctx.lineTo(px(tr.x[q] - tr.ty[q] * w1 * sg2), py(tr.y[q] + tr.tx[q] * w1 * sg2, zz)); ctx.closePath(); ctx.fill();
+      ctx.fillStyle = '#d2c6ad'; ctx.beginPath(); quad(q, true, 0); ctx.fill();
+    }
+    // slipers och räls för punkterna from .. from+count som klarar test
+    function rails(from, count, test) {
+      var q, m;
+      ctx.strokeStyle = '#7a5836'; ctx.lineWidth = Math.max(1.5, 0.46 * S); ctx.lineCap = 'butt'; ctx.beginPath();
+      for (m = 0; m < count; m++) {
+        q = ((from + m) % N + N) % N;
+        if (q % 2 || !test(q) || !vis(q)) continue;
+        ctx.moveTo(px(tr.x[q] - tr.ty[q] * 1.45), py(tr.y[q] + tr.tx[q] * 1.45, tr.z[q])); ctx.lineTo(px(tr.x[q] + tr.ty[q] * 1.45), py(tr.y[q] - tr.tx[q] * 1.45, tr.z[q]));
+      }
+      ctx.stroke();
+      ctx.lineJoin = 'round';
+      for (var pass = 0; pass < 2; pass++) {
+        ctx.strokeStyle = pass ? '#eef1f5' : '#3d424c';
+        ctx.lineWidth = pass ? Math.max(1, 0.18 * S) : Math.max(2.2, 0.42 * S);
+        for (var sd = -1; sd <= 1; sd += 2) {
+          ctx.beginPath(); var pen = false;
+          for (m = 0; m <= count; m++) {
+            q = ((from + m) % N + N) % N;
+            if (!test(q) || !vis(q)) { pen = false; continue; }
+            var rx = px(tr.x[q] - tr.ty[q] * .8 * sd), ry = py(tr.y[q] + tr.tx[q] * .8 * sd, tr.z[q] + .12);
+            if (pen) ctx.lineTo(rx, ry); else { ctx.moveTo(rx, ry); pen = true; }
+          }
+          ctx.stroke();
         }
-        ctx.fill();
-        // slänten som vetter mot kameran lite ljusare
-        var sg2 = tr.tx[i] > 0 ? 1 : -1;
-        ctx.fillStyle = '#93784f'; ctx.beginPath();
-        ctx.moveTo(px(tr.x[i] - tr.ty[i] * w0 * sg2), py(tr.y[i] + tr.tx[i] * w0 * sg2, 0)); ctx.lineTo(px(tr.x[m] - tr.ty[m] * w0 * sg2), py(tr.y[m] + tr.tx[m] * w0 * sg2, 0));
-        ctx.lineTo(px(tr.x[m] - tr.ty[m] * w1 * sg2), py(tr.y[m] + tr.tx[m] * w1 * sg2, zm)); ctx.lineTo(px(tr.x[i] - tr.ty[i] * w1 * sg2), py(tr.y[i] + tr.tx[i] * w1 * sg2, zz)); ctx.closePath(); ctx.fill();
-        ctx.fillStyle = '#b9ad98'; ctx.beginPath(); quad(i, true, 0); ctx.fill();
       }
     }
-    // ballast på plan mark
-    ctx.fillStyle = '#b9ad98'; ctx.beginPath();
-    for (i = 0; i < N; i++) if (tr.z[i] < 0.12 && vis(i)) quad(i, true, 0);
+    function notSpan(q) { return !span[q]; }
+    function always() { return true; }
+
+    // 1. allt spår utom spannen över korsningar: banvall bortifrån och framåt, ballast, slipers, räls
+    if (tr.maxZ > 0.15) for (var o = 0; o < data.order.length; o++) { i = data.order[o]; if (tr.z[i] >= 0.12 && vis(i)) embank(i, false); }
+    ctx.fillStyle = '#a3957b'; ctx.beginPath();
+    for (i = 0; i < N; i++) if (!span[i] && tr.z[i] < 0.12 && vis(i)) quad(i, true, 0.32);
     ctx.fill();
-    // slipers
-    ctx.strokeStyle = '#6a4f35'; ctx.lineWidth = Math.max(1.5, 0.42 * S); ctx.lineCap = 'butt'; ctx.beginPath();
-    for (i = 0; i < N; i += 2) if (vis(i)) {
-      ctx.moveTo(px(tr.x[i] - tr.ty[i] * 1.45), py(tr.y[i] + tr.tx[i] * 1.45, tr.z[i])); ctx.lineTo(px(tr.x[i] + tr.ty[i] * 1.45), py(tr.y[i] - tr.tx[i] * 1.45, tr.z[i]));
-    }
-    ctx.stroke();
+    ctx.fillStyle = '#d2c6ad'; ctx.beginPath();
+    for (i = 0; i < N; i++) if (!span[i] && tr.z[i] < 0.12 && vis(i)) quad(i, true, 0);
+    ctx.fill();
     // start- och mållinje
     var g0 = tr.at(0, P1);
     for (i = 0; i < 6; i++) {
@@ -640,43 +1047,113 @@
       ctx.moveTo(px(g0.x - g0.ty * BW * fa - g0.tx * .5), py(g0.y + g0.tx * BW * fa - g0.ty * .5, g0.z)); ctx.lineTo(px(g0.x - g0.ty * BW * fb - g0.tx * .5), py(g0.y + g0.tx * BW * fb - g0.ty * .5, g0.z));
       ctx.lineTo(px(g0.x - g0.ty * BW * fb + g0.tx * .5), py(g0.y + g0.tx * BW * fb + g0.ty * .5, g0.z)); ctx.lineTo(px(g0.x - g0.ty * BW * fa + g0.tx * .5), py(g0.y + g0.tx * BW * fa + g0.ty * .5, g0.z)); ctx.closePath(); ctx.fill();
     }
-    // räls
-    ctx.lineWidth = Math.max(1.2, 0.24 * S); ctx.lineJoin = 'round';
-    for (var pass = 0; pass < 2; pass++) {
-      ctx.strokeStyle = pass ? '#dfe4ea' : '#4a4f58';
-      if (!pass) ctx.lineWidth = Math.max(2.2, 0.4 * S); else ctx.lineWidth = Math.max(1, 0.18 * S);
-      for (var sd = -1; sd <= 1; sd += 2) {
-        ctx.beginPath(); var pen = false;
-        for (i = 0; i <= N; i++) {
-          var k = i % N;
-          if (!vis(k)) { pen = false; continue; }
-          var rx = px(tr.x[k] - tr.ty[k] * .8 * sd), ry = py(tr.y[k] + tr.tx[k] * .8 * sd, tr.z[k] + .12);
-          if (pen) ctx.lineTo(rx, ry); else { ctx.moveTo(rx, ry); pen = true; }
-        }
-        ctx.stroke();
+    rails(0, N, notSpan);
+
+    // 2. föremål sorterade bortifrån och framåt: landskap, målflagga, fordon och fjädrar.
+    //    Fordon som står på en bro eller tunnelkulle väntar till steg 4.
+    var cars = run.train.cars, pose = {}, high = [], late = [], gy = g0.y;
+    for (i = 0; i < cars.length; i++) {
+      high[i] = false;
+      for (k = -1; k <= 1 && data.spans.length; k++) {
+        var u = (((cars[i].s + k * cars[i].len * 0.5) % tr.L) + tr.L) % tr.L;
+        if (span[Math.floor(u / tr.ds) % N]) high[i] = true;
       }
     }
+    items.push([gy, 1, null]);
+    for (i = 0; i < cars.length; i++) {
+      carPose(run, i, pose);
+      (high[i] ? late : items).push([pose.y, 2, i]);
+      if (i < cars.length - 1) { var y2 = carPose(run, i + 1, P2).y; (high[i] || high[i + 1] ? late : items).push([(pose.y + y2) / 2 - 0.01, 3, i]); }
+    }
+    function byY(a, b) { return a[0] - b[0]; }
+    function drawItems(list) {
+      list.sort(byY);
+      for (var q = 0; q < list.length; q++) {
+        var it = list[q];
+        if (it[1] === 0) drawThing(it[2]); else if (it[1] === 1) drawGate(tr); else if (it[1] === 2) drawCar(run, it[2]); else drawSpring(run, it[2]);
+      }
+    }
+    drawItems(items);
 
-    // föremål sorterade bortifrån och framåt: träd, målport, fordon och fjädrar
-    var items = [], cars = run.train.cars, trees = run.data.trees, pose = {};
-    for (i = 0; i < trees.length; i++) {
-      var tx = px(trees[i].x), ty = py(trees[i].y, 0);
-      if (tx > -50 && tx < W + 50 && ty > -10 && ty < H + 90) items.push([trees[i].y, 0, trees[i]]);
-    }
-    items.push([g0.y, 1, null]);
-    for (i = 0; i < cars.length; i++) { carPose(run, i, pose); items.push([pose.y, 2, i]); if (i < cars.length - 1) { var y2 = carPose(run, i + 1, P2).y; items.push([(pose.y + y2) / 2 - 0.01, 3, i]); } }
-    items.sort(function (a, b) { return a[0] - b[0]; });
-    for (i = 0; i < items.length; i++) {
-      var it = items[i];
-      if (it[1] === 0) drawTree(it[2]); else if (it[1] === 1) drawGate(tr); else if (it[1] === 2) drawCar(run, it[2]); else drawSpring(run, it[2]);
-    }
+    // 3. spannen: bro (pelare, balk, däck) eller tunnel (gräskulle med stenmynningar) över det undre spåret
+    data.spans.forEach(function (sp) {
+      var L = sp.list, e0 = L[0], e1 = L[L.length - 1], q, m;
+      if (!vis(sp.c.hi) && !vis(e0) && !vis(e1)) return;
+      if (sp.kind === 1) {
+        ctx.fillStyle = 'rgba(0,20,10,.2)'; ctx.beginPath(); for (m = 0; m < L.length; m++) quad(L[m], false, 0.3); ctx.fill();
+        [e0, e1].sort(function (a, b) { return tr.y[a] - tr.y[b]; }).forEach(function (e) {
+          box(tr.x[e], tr.y[e], 0, tr.tx[e], tr.ty[e], 0, 1.3, BW + 0.9, 0, tr.z[e] + 0.06, '#cfc9bd', '#a9a39a', 0);
+        });
+        // balkarna: först den bortre, sedan däcket, sist den som vetter mot kameran
+        for (var pass = 0; pass < 2; pass++) {
+          if (pass) {
+            ctx.fillStyle = '#8a5a3a'; ctx.beginPath(); for (m = 0; m < L.length; m++) quad(L[m], true, 0.45); ctx.fill();
+            ctx.fillStyle = '#d2c6ad'; ctx.beginPath(); for (m = 0; m < L.length; m++) quad(L[m], true, 0); ctx.fill();
+          }
+          for (m = 0; m < L.length - 1; m++) {
+            q = L[m]; var q2 = L[m + 1], sgn = (tr.tx[q] > 0 ? 1 : -1) * (pass ? 1 : -1), wg = BW + 0.45;
+            var ax = tr.x[q] - tr.ty[q] * wg * sgn, ay = tr.y[q] + tr.tx[q] * wg * sgn, bx2 = tr.x[q2] - tr.ty[q2] * wg * sgn, by2 = tr.y[q2] + tr.tx[q2] * wg * sgn;
+            poly([ax, ay, tr.z[q] - 1.3, bx2, by2, tr.z[q2] - 1.3, bx2, by2, tr.z[q2] + 0.05, ax, ay, tr.z[q] + 0.05], pass ? '#d4483b' : '#9c3229', false);
+            if (pass && m % 3 === 0) poly([ax, ay, tr.z[q] - 1.3, ax, ay, tr.z[q] + 0.05], null, 'rgba(60,15,10,.6)');
+          }
+        }
+        rails(e0 - 1, L.length + 1, always);
+      } else {
+        // kullen bortifrån och framåt, med stenmynningarna instuckna på sin plats i ordningen
+        var pi = 0, hw = 2.7, ht = 4.9;
+        function portalBox(po) { box(po.x, po.y, po.z, po.dx, po.dy, 0, po.hl, hw, 0, ht, '#c3c6cd', '#a3a7b0', 0); }
+        for (m = 0; m < sp.order.length; m++) {
+          q = sp.order[m];
+          while (pi < sp.portals.length && sp.portals[pi].y < tr.y[q]) portalBox(sp.portals[pi++]);
+          var idx = (q - e0 + N) % N;
+          embank(q, true, Math.min(1, Math.min(idx, L.length - 1 - idx) / 7));
+        }
+        while (pi < sp.portals.length) portalBox(sp.portals[pi++]);
+        rails(e0 - 1, L.length + 1, always);
+        sp.portals.forEach(function (po) {
+          if (po.dy <= 0.05) return;
+          // mynningen på gaveln mot kameran, och fordonen i den ritas om inuti öppningen
+          var fx = po.x + po.dx * po.hl, fy = po.y + po.dy * po.hl, nx = -po.dy, ny = po.dx, a, pts = [];
+          pts.push(fx - nx * 1.85, fy - ny * 1.85, po.z);
+          for (a = 0; a <= 8; a++) { var an = Math.PI - a * Math.PI / 8; pts.push(fx + nx * 1.85 * Math.cos(an), fy + ny * 1.85 * Math.cos(an), po.z + 2.6 + 1.85 * Math.sin(an)); }
+          pts.push(fx + nx * 1.85, fy + ny * 1.85, po.z);
+          poly(pts, '#12141a', true);
+          ctx.save(); ctx.beginPath();
+          var far = 24, c8 = [];
+          [[0, 1.9], [far, 4.2]].forEach(function (d) {
+            [-1, 1].forEach(function (s2) { [0, 4.6].forEach(function (zz) {
+              c8.push([px(fx + po.dx * d[0] + nx * d[1] * s2), py(fy + po.dy * d[0] + ny * d[1] * s2, po.z + zz)]);
+            }); });
+          });
+          hull(c8); ctx.clip();
+          for (m = 0; m < cars.length; m++) {
+            if (high[m]) continue;
+            carPose(run, m, pose);
+            if (Math.hypot(pose.x - po.x, pose.y - po.y) > 34) continue;
+            if (m > 0 && !high[m - 1]) drawSpring(run, m - 1);
+            drawCar(run, m);
+          }
+          ctx.restore();
+        });
+      }
+    });
+
+    // 4. fordon uppe på spannen
+    drawItems(late);
+
     // rök, gnistor, damm
     for (i = 0; i < run.parts.length; i++) {
-      var q = run.parts[i], fl = q.life / q.max;
-      ctx.globalAlpha = (1 - fl) * (q.a || 0.75); ctx.fillStyle = q.col;
-      ctx.beginPath(); ctx.arc(px(q.x), py(q.y, q.z), (q.size + q.grow * fl) * S, 0, 6.3); ctx.fill();
+      var pq = run.parts[i], fl = pq.life / pq.max;
+      ctx.globalAlpha = (1 - fl) * (pq.a || 0.8); ctx.fillStyle = pq.col;
+      ctx.beginPath(); ctx.arc(px(pq.x), py(pq.y, pq.z), (pq.size + pq.grow * fl) * S, 0, 6.3); ctx.fill();
     }
     ctx.globalAlpha = 1;
+    // molnskuggor som sakta driver över landskapet
+    ctx.fillStyle = 'rgba(10,40,60,.07)';
+    for (i = 0; i < 4; i++) {
+      var mx0 = cam.x + ((((i * 173 + NOW * 4 - cam.x) % 460) + 460) % 460) - 230, my0 = cam.y + ((((i * 97 + NOW * 1.4 - cam.y) % 320) + 320) % 320) - 160;
+      ctx.beginPath(); ctx.ellipse(px(mx0), py(my0, 0), 40 * S, 22 * S * TY, 0, 0, 6.3); ctx.ellipse(px(mx0 + 30), py(my0 + 8, 0), 28 * S, 16 * S * TY, 0, 0, 6.3); ctx.fill();
+    }
 
     if (!run.demo) {
       // karta med tågets fordon
@@ -696,11 +1173,23 @@
     }
   }
 
+  // Lägger det konvexa höljet av skärmpunkterna som bana i ctx (används som urklipp vid tunnelmynningar).
+  function hull(pts) {
+    pts.sort(function (a, b) { return a[0] - b[0] || a[1] - b[1]; });
+    function cross(o, a, b) { return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]); }
+    var lo = [], up = [], i;
+    for (i = 0; i < pts.length; i++) { while (lo.length >= 2 && cross(lo[lo.length - 2], lo[lo.length - 1], pts[i]) <= 0) lo.pop(); lo.push(pts[i]); }
+    for (i = pts.length - 1; i >= 0; i--) { while (up.length >= 2 && cross(up[up.length - 2], up[up.length - 1], pts[i]) <= 0) up.pop(); up.push(pts[i]); }
+    var h = lo.slice(0, -1).concat(up.slice(0, -1));
+    for (i = 0; i < h.length; i++) { if (i) ctx.lineTo(h[i][0], h[i][1]); else ctx.moveTo(h[i][0], h[i][1]); }
+    ctx.closePath();
+  }
+
   /* ---------- huvudslinga och start ---------- */
 
   var last = 0;
   function frame(t) {
-    var dt = Math.min(0.05, (t - last) / 1000 || 0); last = t;
+    var dt = Math.min(0.05, (t - last) / 1000 || 0); last = t; NOW = t / 1000;
     try { update(dt); render(); } catch (e) { if (!frame.err) { frame.err = true; console.error(e); } }
     requestAnimationFrame(frame);
   }
@@ -753,6 +1242,10 @@
       if (lv !== null) {
         // provlägen: ?level=N startar bana N direkt, &auto=1 låter den inbyggda föraren köra, &warp=S spolar fram S sekunder
         show(null); play(Math.min(CFG.levels.length - 1, +lv || 0));
+        var pos = +Q.get('pos') || 0;
+        if (pos) { run.count = 0; run.train.cars.forEach(function (c) { c.s += pos; }); run.hold = Q.get('hold') === '1'; var pp = run.data.tr.at(pos); run.cam.x = pp.x; run.cam.y = pp.y; run.cam.z = pp.z; }
+        var find = Q.get('find'); // provläge &find=house|mill|pond|sheep|cow: kameran ställs vid första föremålet av den sorten
+        if (find) { run.count = 0; run.hold = true; run.findCam = null; for (var ck in run.data.cells) run.data.cells[ck].forEach(function (o) { if (o.t === find && !run.findCam) run.findCam = o; }); }
         var warp = +Q.get('warp') || 0;
         if (warp) { run.count = 0; for (var n = 0; n < warp * 60 && mode === 'play'; n++) update(1 / 60); }
       }
