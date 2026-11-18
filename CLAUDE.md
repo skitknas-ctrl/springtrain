@@ -123,3 +123,21 @@ tar czf - springtrain | ssh -i ~/.ssh/id_ed25519_isba root@78.109.17.72 'cd /opt
 - Serverns config (gr8eam_db `springtrain_config` id 1) uppdaterad till dessa 20 banor via `st_update.php` i gr8eam-app
   (behåller updated_by). Gammal config säkerhetskopierad på servern: `/tmp/st_config_backup_20261118.json` (6 banor).
   defaults.js deployad till gr8eam-containern (admins "Återställ"). Appen hämtar serverns config vid start → visar de 20.
+
+## 20 banor med var sin form (2026-11-18 kväll, Dick: "alla ska vara unika uppifrån sett")
+- Ersätter avsnittet ovan: de förra banorna (oval + "flower"-varianter + åttor) såg för lika ut uppifrån. Nu har varje bana en egen
+  silhuett: oval, njure, triangel, L, jordnöt, åtta (tunnel), hästsko, T, klöver, hjärta, stående åtta (bro), krona, kors,
+  sjöstjärna, fluga, slinga-i-slinga (tunnel), treudd (E), oregelbunden slinga, Z och en lång oregelbunden slutbana. Varannan
+  bana är spegelvänd så att körriktningen växlar. Id `lvl01`–`lvl20` är oförändrade; namnen är nya.
+- Skripten ligger i `tools/banor/` (kopior av arbetsfilerna; sökvägarna i dem pekar på en scratchpad-mapp och måste ändras
+  före körning): `gen.js` (formerna som hörnpolygoner med rundade hörn eller kurvor → jämnt fördelade styrpunkter → skalning →
+  backar), `join.js`, `sheet.py` (översiktsbild), `emit.py` (skriver `levels` i båda `defaults.js` + serverns config).
+  `node gen.js --shapes` ritar bara formerna, `node gen.js 6 12` skalar bana 6–12, `node gen.js probe 9 1.2,2` provkör en skala.
+- Lärdomar: (1) styrpunkterna måste ligga JÄMNT längs banan – ojämnt fördelade punkter ger små knyckar i Catmull-Rom som
+  spårar ur tåget på till synes raka bitar. (2) Större skala hjälper inte alltid mot urspårning; tiden har ett minimum per form.
+  Därför väljs först minsta skala (snävaste kurvan ≥ 19 m på bana 2, ned till 13 m på bana 20), sedan flest varv (högst 3 resp. 2)
+  som ryms i måltiden, sedan skalas banan upp till måltiden. Treudden blev 1 varv (2,3 km). (3) Styrpunkternas läge längs spåret
+  måste sökas framåt i tur och ordning, annars får punkter nära en korsning det andra spårets höjd.
+- Backar: krön 0,7 halvbredder före de skarpaste kurvorna, fler/högre/brantare för varje bana (0 på bana 1–2, upp till 4 krön,
+  7 m och 9 % lutning). Vagnar 2→6. Guldtider 78–222 s. `calibrate --check` går igenom.
+- Servern uppdaterad på samma sätt som förra gången (`st_update.php`); föregående config: `/tmp/st_config_backup_20261118_kvall.json`.
