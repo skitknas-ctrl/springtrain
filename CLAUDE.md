@@ -110,3 +110,16 @@ Copy-Item P:\Appar\SpringTrain\web\js\defaults.js, P:\Appar\SpringTrain\web\js\s
 cd C:\Users\dick\kod\gr8eam.com
 tar czf - springtrain | ssh -i ~/.ssh/id_ed25519_isba root@78.109.17.72 'cd /opt/docker-apps/gr8eam/html && tar xzf - --no-same-owner && chown -R 1004:1004 springtrain'
 ```
+
+## 20 banor (2026-11-18, Dick)
+- Banorna gjordes om till 20 med stigande svårighet och längd (ersätter de tidigare 6/9; Dicks varv-ändringar på servern
+  slopades). Bana 1 `lvl01` = en 400 m löparbana (oval, vänstra kurvan r28 skarpare än högra r33), platt, 3 varv, tutorial.
+  Sedan fler kurvor åt båda håll, backar (krön lagt strax FÖRE de snäva svängarna → utför ner i svängen, vagnarna skjuter
+  på), och tre figur-åttor med bro/tunnel (`lvl06` tunnel, `lvl11` bro, `lvl16` tunnel). Vagnar 2→6. Aldrig mer än 3 varv.
+  Guldtider ~77–222 s (mål ~4 min speltid för en människa). Alla går att köra klart med starttåget (bygget: `calibrate --check`).
+- Formerna genereras + provkörs (tid/varv/svårighet) av scratchpad-skriptet `st_gen.js` (oval/flower/fig8 + autopilot-sökning),
+  `st_emit.py` skriver `levels`-blocket i `web/js/defaults.js` OCH `kod\gr8eam.com\springtrain\defaults.js` (identiska) och
+  hela serverns config (`st_config.json`). `view.meters` = 150 (Dicks serverinställning) i båda.
+- Serverns config (gr8eam_db `springtrain_config` id 1) uppdaterad till dessa 20 banor via `st_update.php` i gr8eam-app
+  (behåller updated_by). Gammal config säkerhetskopierad på servern: `/tmp/st_config_backup_20261118.json` (6 banor).
+  defaults.js deployad till gr8eam-containern (admins "Återställ"). Appen hämtar serverns config vid start → visar de 20.
