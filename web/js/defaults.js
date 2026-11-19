@@ -38,6 +38,8 @@
     message: '',
     // true = alla banor öppna från början (för test).
     unlockAll: false,
+    // true = knappen "Reset progress" visas under How to play (utprovning). Sätt false före lansering.
+    testReset: true,
 
     physics: {
       springK: 50,        // fjäderns styvhet utan uppgradering, kN per meter (mjukast)

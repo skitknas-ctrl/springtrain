@@ -141,3 +141,16 @@ tar czf - springtrain | ssh -i ~/.ssh/id_ed25519_isba root@78.109.17.72 'cd /opt
 - Backar: krön 0,7 halvbredder före de skarpaste kurvorna, fler/högre/brantare för varje bana (0 på bana 1–2, upp till 4 krön,
   7 m och 9 % lutning). Vagnar 2→6. Guldtider 78–222 s. `calibrate --check` går igenom.
 - Servern uppdaterad på samma sätt som förra gången (`st_update.php`); föregående config: `/tmp/st_config_backup_20261118_kvall.json`.
+
+## Upplåsningstider och nollställning (2026-11-19, Dick)
+- Dicks idé: nästa bana öppnas först när föregående klarats på en viss tid, och den tiden ska vara omöjlig med tåget man har
+  när man kommer till banan första gången – man måste uppgradera. INTE BYGGT; bara räknat på bana 1–4 med
+  `node tools/unlock.js 4 <config.json>` (snabbaste körningen som går i mål över alla kombinationer av kurvmarginal och
+  bromsförtroende = "bästa förare", jämfört med en duktig människa på 85 %).
+- Resultat med dagens värden: en motornivå (+15 %) ger bara 1–3 s (1,5–2,7 %) per bana, lika mycket som skillnaden mellan
+  bästa förare och en duktig människa. Bromsnivåer ger ingen mätbar skillnad (banorna begränsas av kurvfarten). Med fem
+  nivåer räcker stegen inte till 19 spärrar. Principen går alltså att räkna på, men ekonomin måste göras om först
+  (större steg per nivå, fler nivåer/tåg, bromsar som spelar roll). Väntar på Dicks besked.
+- Nollställning: inställningen `testReset` (true i defaults.js under utprovningen; sätt false före lansering) visar knappen
+  "Reset progress (testing)" längst ned under How to play. Två tryck. Tar bort pengar, köpta tåg, uppgraderingar, tider,
+  stjärnor och därmed öppnade banor; ljudinställningen behålls.

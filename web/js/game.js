@@ -1217,7 +1217,16 @@
 
     $('bPlay').onclick = function () { audioInit(); showLevels(); };
     $('bShop').onclick = function () { audioInit(); showShop(); };
-    $('bInfo').onclick = function () { show('sInfo'); };
+    // Nollställning under utprovningen (Dick 2026-11-19): pengar, tåg, uppgraderingar, tider och öppnade banor försvinner.
+    // Visas bara när inställningen testReset är på. Två tryck, eftersom WebView saknar confirm().
+    var resetArmed = false;
+    function resetLabel() { $('bReset').textContent = resetArmed ? 'Tap again to erase coins, trains, upgrades and unlocked tracks' : 'Reset progress (testing)'; }
+    $('bInfo').onclick = function () { resetArmed = false; resetLabel(); $('resetBox').hidden = !CFG.testReset; show('sInfo'); };
+    $('bReset').onclick = function () {
+      if (!resetArmed) { resetArmed = true; resetLabel(); return; }
+      save = { money: null, train: null, owned: {}, best: {}, stars: {}, sound: save.sound };
+      fixSave(); persist(); showMenu();
+    };
     $('bQuit').onclick = function () { if (APP && APP.quit) APP.quit(); };
     $('sndBtn').onclick = function () { save.sound = !save.sound; persist(); if (save.sound) audioInit(); showMenu(); };
     var backs = document.querySelectorAll('[data-back]');
